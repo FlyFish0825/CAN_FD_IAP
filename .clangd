@@ -1,0 +1,12 @@
+CompileFlags:
+  CompilationDatabase: build/Debug
+  Compiler: C:/Users/Admin/.eide/tools/gcc_arm/bin/arm-none-eabi-gcc.exe
+
+Index:
+  Background: Build
+
+Diagnostics:
+  UnusedIncludes: None
+
+Hover:
+  ShowAKA: true

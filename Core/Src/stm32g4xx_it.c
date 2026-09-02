@@ -22,6 +22,7 @@
 #include "stm32g4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "boot_can_protocol.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -227,5 +228,20 @@ void FDCAN1_IT1_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+
+void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan,
+                               uint32_t RxFifo0ITs) {
+
+  if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != 0) {
+
+    FDCAN_RxHeaderTypeDef rxHeader;
+
+    uint8_t rxData[8];
+
+    HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rxHeader, rxData);
+
+    BootCAN_Process(rxData, 8);
+  }
+}
 
 /* USER CODE END 1 */

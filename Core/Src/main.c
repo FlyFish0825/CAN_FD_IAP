@@ -24,7 +24,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+#include "boot_can_protocol.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -93,35 +93,20 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
 
-  uint8_t data1[8] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+  FDCAN_FilterTypeDef filter;
+  filter.IdType = FDCAN_STANDARD_ID;
+  filter.FilterIndex = 0;
+  filter.FilterType = FDCAN_FILTER_MASK;
+  filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
+  filter.FilterID1 = 0x000;
+  filter.FilterID2 = 0x000;
+  HAL_FDCAN_ConfigFilter(&hfdcan1, &filter);
 
+
+  
   HAL_FDCAN_Start(&hfdcan1);
-
-  FDCAN_TxHeaderTypeDef txHeader;
-
-uint8_t data2[8]={
-0x11,0x22,0x33,0x44,
-0x55,0x66,0x77,0x88
-};
-
-
-txHeader.Identifier = 0x123;
-txHeader.IdType = FDCAN_STANDARD_ID;
-txHeader.TxFrameType = FDCAN_DATA_FRAME;
-txHeader.DataLength = FDCAN_DLC_BYTES_8;
-txHeader.ErrorStateIndicator =
-FDCAN_ESI_ACTIVE;
-
-txHeader.BitRateSwitch =
-FDCAN_BRS_OFF;
-
-txHeader.FDFormat =
-FDCAN_CLASSIC_CAN;
-
-txHeader.TxEventFifoControl =
-FDCAN_NO_TX_EVENTS;
-
-
+  HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
+  BootCAN_Init(1);
 
 
 
@@ -131,8 +116,7 @@ FDCAN_NO_TX_EVENTS;
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    HAL_UART_Transmit(&huart2, data1, sizeof(data1), HAL_MAX_DELAY);
-    HAL_FDCAN_AddMessageToTxFifoQ(&hfdcan1, &txHeader, data2);
+    
     HAL_Delay(1000); // Delay for 1 second
     /* USER CODE END WHILE */
 

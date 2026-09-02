@@ -22,7 +22,7 @@
 #include "stm32g4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "boot_can_protocol.h"
+#include "can_rx_buffer.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -58,6 +58,9 @@
 /* External variables --------------------------------------------------------*/
 extern FDCAN_HandleTypeDef hfdcan1;
 /* USER CODE BEGIN EV */
+
+/* 接收缓冲实例定义在 main.c，由主循环和 FDCAN 回调共同使用。 */
+extern CAN_RX_Handle_t boot_rx;
 
 /* USER CODE END EV */
 
@@ -230,18 +233,13 @@ void FDCAN1_IT1_IRQHandler(void)
 /* USER CODE BEGIN 1 */
 
 void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan,
-                               uint32_t RxFifo0ITs) {
-
-  if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) != 0) {
-
-    FDCAN_RxHeaderTypeDef rxHeader;
-
-    uint8_t rxData[8];
-
-    HAL_FDCAN_GetRxMessage(hfdcan, FDCAN_RX_FIFO0, &rxHeader, rxData);
-
-    BootCAN_Process(rxData, 8);
-  }
+                               uint32_t RxFifo0ITs)
+{
+  /*
+   * 中断中只读取硬件 FIFO0 并写入环形缓冲。
+   * BootCAN_Process() 已移到 main() 的 CAN_RX_Process() 中执行。
+   */
+  CAN_RX_Fifo0Callback(&boot_rx, hfdcan, RxFifo0ITs);
 }
 
 /* USER CODE END 1 */

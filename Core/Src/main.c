@@ -24,7 +24,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "boot_can_config.h"
 #include "boot_can_protocol.h"
+#include "can_rx_buffer.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -45,6 +47,12 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+
+/*
+ * Bootloader 的 FDCAN 软件接收缓冲。
+ * FDCAN 中断只写入该缓冲，main() 主循环负责读取并解析协议。
+ */
+CAN_RX_Handle_t boot_rx;
 
 /* USER CODE END PV */
 
@@ -92,23 +100,45 @@ int main(void)
   MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 
-
-  FDCAN_FilterTypeDef filter;
+  /* 只把 Bootloader 标准命令 ID 放入 FDCAN RX FIFO0。 */
+  FDCAN_FilterTypeDef filter = {0};
   filter.IdType = FDCAN_STANDARD_ID;
   filter.FilterIndex = 0;
   filter.FilterType = FDCAN_FILTER_MASK;
   filter.FilterConfig = FDCAN_FILTER_TO_RXFIFO0;
-  filter.FilterID1 = 0x000;
-  filter.FilterID2 = 0x000;
-  HAL_FDCAN_ConfigFilter(&hfdcan1, &filter);
+  filter.FilterID1 = BOOT_CAN_CMD_ID;
+  filter.FilterID2 = 0x7FF; /* 11 位全部参与匹配，因此是精确 ID 匹配。 */
 
+  if (HAL_FDCAN_ConfigFilter(&hfdcan1, &filter) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
-  
-  HAL_FDCAN_Start(&hfdcan1);
-  HAL_FDCAN_ActivateNotification(&hfdcan1, FDCAN_IT_RX_FIFO0_NEW_MESSAGE, 0);
-  BootCAN_Init(1);
+  /* 非匹配帧和远程帧不进入接收 FIFO，减少无关中断和软件缓冲占用。 */
+  if (HAL_FDCAN_ConfigGlobalFilter(&hfdcan1,
+                                   FDCAN_REJECT,
+                                   FDCAN_REJECT,
+                                   FDCAN_REJECT_REMOTE,
+                                   FDCAN_REJECT_REMOTE) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
+  /* 必须在启动 FDCAN 和打开通知前完成软件缓冲与协议层初始化。 */
+  CAN_RX_Init(&boot_rx, &hfdcan1);
+  BootCAN_Init(1); /* 当前板卡 Node ID = 1。 */
 
+  if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  if (HAL_FDCAN_ActivateNotification(&hfdcan1,
+                                     FDCAN_IT_RX_FIFO0_NEW_MESSAGE,
+                                     0) != HAL_OK)
+  {
+    Error_Handler();
+  }
 
   /* USER CODE END 2 */
 
@@ -116,8 +146,11 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    
-    HAL_Delay(1000); // Delay for 1 second
+    /*
+     * 在非中断环境中读取环形缓冲并调用 BootCAN_Process()。
+     * 此处不能保留原来的 HAL_Delay(1000)，否则连续报文会堆满缓冲。
+     */
+    CAN_RX_Process(&boot_rx);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

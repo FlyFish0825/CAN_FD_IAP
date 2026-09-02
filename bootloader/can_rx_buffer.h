@@ -43,10 +43,9 @@ typedef struct
 void CAN_RX_Init(CAN_RX_Handle_t *rx, FDCAN_HandleTypeDef *hfdcan);
 uint8_t CAN_RX_Read(CAN_RX_Handle_t *rx, CAN_RX_Message_t *msg);
 
-void HAL_FDCAN_RxFifo0Callback(
-    FDCAN_HandleTypeDef *hfdcan,
-    uint32_t RxFifo0ITs
-);
+void CAN_RX_Fifo0Callback(CAN_RX_Handle_t *rx,
+                          FDCAN_HandleTypeDef *hfdcan,
+                          uint32_t RxFifo0ITs);
 
 #ifdef __cplusplus
 }

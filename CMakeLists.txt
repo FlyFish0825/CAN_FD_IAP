@@ -49,6 +49,10 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/boot_can_rx.c
     ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/can_rx_buffer.c
     ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/boot_can_port.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/boot_crc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/boot_runtime.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/boot_storage.c
+    
     
 )
 

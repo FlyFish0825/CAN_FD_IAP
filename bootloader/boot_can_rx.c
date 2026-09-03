@@ -6,28 +6,27 @@ void BootCAN_RX_Process(CAN_RX_Handle_t *rx)
 {
     CAN_RX_Message_t msg;
 
-    while (CAN_RX_Read(rx, &msg))
+    while (CAN_RX_Read(rx, &msg) != 0U)
     {
-        if (msg.ide != 0U)
+        if ((msg.ide != 0U) || (msg.rtr != 0U))
         {
             continue;
         }
 
-        if (msg.rtr != 0U)
+        if ((msg.id == BOOT_CAN_CMD_ID) &&
+            (msg.fd == 0U) &&
+            (msg.dlc == BOOT_CAN_CTRL_DLC))
         {
+            BootCAN_ProcessControl(msg.data, msg.dlc);
             continue;
         }
 
-        if (msg.id != BOOT_CAN_CMD_ID)
+        if ((msg.id == BOOT_CAN_FD_DATA_ID) &&
+            (msg.fd != 0U) &&
+            (msg.dlc == BOOT_CAN_FD_DLC))
         {
+            BootCAN_ProcessFDData(msg.data, msg.dlc);
             continue;
         }
-
-        if (msg.dlc != BOOT_CAN_DLC)
-        {
-            continue;
-        }
-
-        BootCAN_Process(msg.data, msg.dlc);
     }
 }

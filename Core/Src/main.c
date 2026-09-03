@@ -148,9 +148,9 @@ int main(void)
   {
     /*
      * 在非中断环境中读取环形缓冲并调用 BootCAN_Process()。
-     * 此处不能保留原来的 HAL_Delay(1000)，否则连续报文会堆满缓冲。
      */
     BootCAN_RX_Process(&boot_rx);
+    BootCAN_Task();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */

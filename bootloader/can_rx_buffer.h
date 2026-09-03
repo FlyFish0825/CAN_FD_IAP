@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define CAN_RX_MAX_DATA_LEN 8U
+#define CAN_RX_MAX_DATA_LEN 64U
 #define CAN_RX_BUFFER_SIZE  32U
 
 typedef struct
@@ -20,9 +20,11 @@ typedef struct
         uint8_t flags;
         struct
         {
-            uint8_t ide : 1;
-            uint8_t rtr : 1;
-            uint8_t reserve : 6;
+            uint8_t ide     : 1;
+            uint8_t rtr     : 1;
+            uint8_t fd      : 1;
+            uint8_t brs     : 1;
+            uint8_t reserve : 4;
         };
     };
 
@@ -42,7 +44,6 @@ typedef struct
 
 void CAN_RX_Init(CAN_RX_Handle_t *rx, FDCAN_HandleTypeDef *hfdcan);
 uint8_t CAN_RX_Read(CAN_RX_Handle_t *rx, CAN_RX_Message_t *msg);
-
 void CAN_RX_Fifo0Callback(CAN_RX_Handle_t *rx,
                           FDCAN_HandleTypeDef *hfdcan,
                           uint32_t RxFifo0ITs);

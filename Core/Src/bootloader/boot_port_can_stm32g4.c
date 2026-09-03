@@ -319,7 +319,7 @@ void BootPort_CAN_Filter_Init() {
   /* 0x100：数据面 */
   filter.FilterIndex = 1;
   filter.FilterID1 = 0x100;
-  filter.FilterID2 = 0x7FF;
+  filter.FilterID2 = 0x7F8;
 
   if (HAL_FDCAN_ConfigFilter(&hfdcan1, &filter) != HAL_OK) {
     Error_Handler();

@@ -848,6 +848,8 @@ Target 10 00 00 00 00 00 CRC
 ↓
 如果是 Guard -> 拒绝
 ↓
+ERASE 状态响应，“我已经接受，开始执行”
+↓
 先保存 app_valid = 0
 ↓
 擦除整个 APP

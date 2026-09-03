@@ -1099,6 +1099,8 @@ static void Boot_HandleErase(uint8_t cmd)
     g_status = BOOT_STATUS_ERASE;
     g_last_error = BOOT_ERR_NONE;
 
+    //收到立即回复
+     (void)Boot_SendResponse(cmd,BOOT_STATUS_ERASE,NULL);
     /* Power-loss safety: invalidate metadata before touching APP Flash. */
     if (Boot_StorageInvalidateApp(g_node_id) == 0U)
     {

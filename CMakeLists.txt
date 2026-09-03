@@ -45,13 +45,9 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
-    ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/boot_can_protocol.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/boot_can_rx.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/can_rx_buffer.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/boot_can_port.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/boot_crc.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/boot_runtime.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/bootloader/boot_storage.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/bootloader/bootloader.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/bootloader/boot_port_can_stm32g4.c
+
     
     
 )
@@ -59,7 +55,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
-    ${CMAKE_CURRENT_SOURCE_DIR}/bootloader
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Inc/bootloader
+
 )
 
 # Add project symbols (macros)

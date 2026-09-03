@@ -228,7 +228,7 @@ static void BootPort_CAN_ProcessClassicDataFragment(
     FDCAN_RxHeaderTypeDef rx_header;
     uint8_t data[64];
     Boot_Message_t message;
-    uint8_t len;
+ 
 
     if ((RxFifo0ITs & FDCAN_IT_RX_FIFO0_NEW_MESSAGE) == 0U)
     {

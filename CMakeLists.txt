@@ -37,6 +37,29 @@ add_executable(${CMAKE_PROJECT_NAME})
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
 
+# Release size tuning for the 20 KiB Bootloader partition.
+#
+# -fipa-pta improves pointer analysis during LTO, allowing GCC to remove more
+# unreachable indirect-call alternatives.
+#
+# -fno-inline-small-functions avoids duplicating several small protocol helpers
+# at their call sites. Explicit always_inline functions are not disabled.
+#
+# Apply the same options to the Bootloader/application sources and to the
+# CubeMX HAL object library. Debug remains unchanged at -O0/-g3.
+set(BOOT_RELEASE_SIZE_OPTIONS
+    -fipa-pta
+    -fno-inline-small-functions
+)
+
+target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE
+    $<$<CONFIG:Release>:${BOOT_RELEASE_SIZE_OPTIONS}>
+)
+
+target_compile_options(STM32_Drivers PRIVATE
+    $<$<CONFIG:Release>:${BOOT_RELEASE_SIZE_OPTIONS}>
+)
+
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths

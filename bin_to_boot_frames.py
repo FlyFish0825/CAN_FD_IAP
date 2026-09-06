@@ -20,7 +20,8 @@ The Bootloader logical DATA packet is identical in both modes:
     Byte0       Target Node
     Byte1       WRITE_DATA = 0x01
     Byte2~3     Sequence (uint16 LE)
-    Byte4~7     Reserved = 0
+    Byte4~5     Session ID (uint16 LE; 0 = legacy)
+    Byte6~7     Reserved = 0
     Byte8~63    56-byte firmware payload
 
 The last firmware chunk is padded with 0xFF.
@@ -61,7 +62,7 @@ def control_frame(target: int, cmd: int, byte2: int = 0, param4: bytes = b"\x00\
     return raw7 + bytes([crc8_atm(raw7)])
 
 
-def build_data_packet(target: int, sequence: int, firmware_chunk: bytes) -> bytes:
+def build_data_packet(target: int, sequence: int, firmware_chunk: bytes, session: int = 0) -> bytes:
     if len(firmware_chunk) > DATA_BYTES_PER_PACKET:
         raise ValueError("firmware chunk too large")
 
@@ -70,7 +71,8 @@ def build_data_packet(target: int, sequence: int, firmware_chunk: bytes) -> byte
     packet = (
         bytes([target & 0xFF, WRITE_DATA_CMD])
         + int(sequence).to_bytes(2, "little")
-        + bytes(4)
+        + int(session & 0xFFFF).to_bytes(2, "little")
+        + bytes(2)
         + payload
     )
 
@@ -112,14 +114,14 @@ def classic_tag(can_id: int, payload: bytes, interval_ms: int) -> str:
     )
 
 
-def emit_classic_canpro(fw: bytes, target: int, interval_ms: int, out: Path) -> None:
+def emit_classic_canpro(fw: bytes, target: int, interval_ms: int, out: Path, session: int = 0) -> None:
     packet_count = (len(fw) + DATA_BYTES_PER_PACKET - 1) // DATA_BYTES_PER_PACKET
 
     lines = ['<SendList m_dwCycles="1">']
 
     for seq in range(packet_count):
         chunk = fw[seq * DATA_BYTES_PER_PACKET:(seq + 1) * DATA_BYTES_PER_PACKET]
-        logical = build_data_packet(target, seq, chunk)
+        logical = build_data_packet(target, seq, chunk, session)
 
         for frag in range(8):
             can_id = CAN_DATA_BASE_ID + frag
@@ -132,7 +134,7 @@ def emit_classic_canpro(fw: bytes, target: int, interval_ms: int, out: Path) -> 
 
 # ---------------- Native CAN FD generic list ----------------
 
-def emit_fd_text(fw: bytes, target: int, out: Path) -> None:
+def emit_fd_text(fw: bytes, target: int, out: Path, session: int = 0) -> None:
     """
     Generic text list because the exact CANPro FD XML encoding has not been
     established from a real CANPro FD SendList sample.
@@ -145,7 +147,7 @@ def emit_fd_text(fw: bytes, target: int, out: Path) -> None:
 
     for seq in range(packet_count):
         chunk = fw[seq * DATA_BYTES_PER_PACKET:(seq + 1) * DATA_BYTES_PER_PACKET]
-        logical = build_data_packet(target, seq, chunk)
+        logical = build_data_packet(target, seq, chunk, session)
 
         lines.append(
             f"ID=0x100 FD=1 BRS=1 DLC=64 SEQ={seq} DATA={logical.hex(' ').upper()}"
@@ -154,9 +156,18 @@ def emit_fd_text(fw: bytes, target: int, out: Path) -> None:
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def print_control_frames(fw: bytes, target: int) -> None:
+def print_control_frames(fw: bytes, target: int, session: int = 0, session_flags: int = 0x01, guard: int = 0) -> None:
     size = len(fw)
     fw_crc = crc32_mpeg2_bytes(fw)
+
+    session_begin = None
+    session_crc32 = None
+    set_guard = None
+    if session:
+        session_begin = control_frame(target, 0x07, session_flags, int(session).to_bytes(2, "little") + b"\x00\x00")
+        session_crc32 = control_frame(target, 0x08, 0x00, fw_crc.to_bytes(4, "little"))
+    if guard:
+        set_guard = control_frame(target, 0x05, guard, b"\x00\x00\x00\x00")
 
     erase = control_frame(target, 0x10)
     write = control_frame(target, 0x11, 0x00, size.to_bytes(4, "little"))
@@ -170,10 +181,18 @@ def print_control_frames(fw: bytes, target: int) -> None:
     print(f"APP CRC32     : 0x{fw_crc:08X}")
     print()
     print("Control frames (CAN ID 0x000, Classic CAN, DLC=8):")
-    print("ERASE     :", erase.hex(" ").upper())
-    print("WRITE     :", write.hex(" ").upper())
-    print("WRITE_END :", write_end.hex(" ").upper())
-    print("VERIFY    :", verify.hex(" ").upper())
+    if session_begin is not None:
+        print("SESSION_BEGIN :", session_begin.hex(" ").upper())
+        print("SESSION_CRC32 :", session_crc32.hex(" ").upper())
+    if set_guard is not None:
+        print("SET_GUARD     :", set_guard.hex(" ").upper())
+    print("ERASE         :", erase.hex(" ").upper())
+    print("WRITE         :", write.hex(" ").upper())
+    print("WRITE_END     :", write_end.hex(" ").upper())
+    if session and (session_flags & 0x04):
+        print("VERIFY        : omitted (COORD_COMMIT uses distributed VERIFY)")
+    else:
+        print("VERIFY(legacy):", verify.hex(" ").upper())
 
 
 def main() -> None:
@@ -181,7 +200,13 @@ def main() -> None:
     ap.add_argument("bin", type=Path, help="APP .bin file")
     ap.add_argument("--mode", choices=["classic", "fd", "both"], default="both")
     ap.add_argument("--target", type=lambda x: int(x, 0), default=1)
-    ap.add_argument("--interval", type=int, default=0.1, help="Classic fragment interval in ms")
+    ap.add_argument("--session", type=lambda x: int(x, 0), default=0,
+                    help="16-bit Session ID; 0 = legacy mode")
+    ap.add_argument("--session-flags", type=lambda x: int(x, 0), default=0x01,
+                    help="Session flags: bit0 peer, bit1 guard rollback, bit2 coordinated commit; full autonomous = 0x07")
+    ap.add_argument("--guard", type=lambda x: int(x, 0), default=0,
+                    help="Optional Guard Node ID 1..8; 0 disables SET_GUARD generation")
+    ap.add_argument("--interval", type=float, default=0.1, help="Classic fragment interval in ms")
     ap.add_argument("-o", "--out-prefix", type=Path, default=None)
 
     args = ap.parse_args()
@@ -193,20 +218,28 @@ def main() -> None:
 
     if len(fw) > 106 * 1024:
         raise SystemExit("BIN exceeds current APP region (106 KiB)")
+    if not (0 <= args.session <= 0xFFFF):
+        raise SystemExit("Session ID must be 0..0xFFFF")
+    if not (0 <= args.session_flags <= 0x07):
+        raise SystemExit("Session flags must be 0..0x07")
+    if not (0 <= args.guard <= 8):
+        raise SystemExit("Guard Node ID must be 0..8")
+    if args.session == 0 and args.session_flags != 0x01:
+        print("Warning: --session-flags is ignored when --session=0")
 
     prefix = args.out_prefix or args.bin.with_suffix("")
 
-    print_control_frames(fw, args.target)
+    print_control_frames(fw, args.target, args.session, args.session_flags, args.guard)
     print()
 
     if args.mode in ("classic", "both"):
         classic_out = Path(str(prefix) + ".classic.canpro.list")
-        emit_classic_canpro(fw, args.target, args.interval, classic_out)
+        emit_classic_canpro(fw, args.target, args.interval, classic_out, args.session)
         print("Classic CANPro file :", classic_out)
 
     if args.mode in ("fd", "both"):
         fd_out = Path(str(prefix) + ".canfd.txt")
-        emit_fd_text(fw, args.target, fd_out)
+        emit_fd_text(fw, args.target, fd_out, args.session)
         print("CAN FD frame list   :", fd_out)
 
     print()
@@ -218,7 +251,8 @@ def main() -> None:
     print("  Byte0    = Target")
     print("  Byte1    = WRITE_DATA (0x01)")
     print("  Byte2~3  = Sequence (uint16 LE)")
-    print("  Byte4~7  = Reserved")
+    print("  Byte4~5  = Session ID (uint16 LE; 0 = legacy)")
+    print("  Byte6~7  = Reserved")
     print("  Byte8~63 = 56-byte firmware payload")
     print()
     print("Classic fallback DATA format:")

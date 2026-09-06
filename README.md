@@ -24,6 +24,20 @@ V1.2 在 V1.1 的广播升级、Bitmap、Missing、Provider、Session、Coordina
 | Config + APP Metadata | `0x0801F800 ~ 0x0801FFFF` | 2 KiB |
 
 APP 必须链接到 `0x08005000`，并设置 `SCB->VTOR = 0x08005000`。
+
+### Bootloader → APP 安全跳转
+
+Bootloader 与 APP 可以使用不同 PLL/系统时钟配置。当前实机验证中，Bootloader 为 170 MHz，而 `Observer_Motor` APP 为 168 MHz；如果直接跳转，APP 的 `HAL_RCC_OscConfig()` 会因为 PLL 仍是当前 SYSCLK 且参数不同而返回 `HAL_ERROR`。
+
+因此 `Boot_RuntimeJumpToApp()` 在设置 MSP/VTOR 和执行 APP Reset_Handler 前，会先执行：
+
+```c
+HAL_DeInit();
+HAL_RCC_DeInit();
+```
+
+并关闭 SysTick、清 NVIC enable/pending、清 PendSV/SysTick pending，使 APP 从接近上电复位的时钟/外设状态重新执行自己的 `HAL_Init()` 和 `SystemClock_Config()`。这个步骤是 APP 可独立配置时钟的必要条件，不应删除。
+
 ## 2. CAN 映射
 
 | 方向 | 类型 | 标准 ID | 帧 |
@@ -128,51 +142,88 @@ Byte8~63    Firmware Payload = 56 Byte
 ```
 
 地址=`0x08005000 + Sequence*56`。最后一包补 `0xFF`，CRC32 只覆盖真实 firmware_size。
-## 6. 命令表
+## 6. 命令分类
 
-| CMD | 名称 | 作用 |
-|---:|---|---|
-| `0x01` | GET_VERSION | Bootloader版本 |
-| `0x02` | GET_DEVICE_ID | `DBGMCU->IDCODE` |
-| `0x03` | GET_INFO | Node/HW/APP/Config |
-| `0x04` | ENTER_BOOT | 保持Bootloader |
-| `0x05` | SET_GUARD | 指定Guard |
-| `0x06` | RELEASE_GUARD | 解除Guard |
-| `0x07` | SESSION_BEGIN | 建立自治升级Session |
-| `0x08` | SESSION_CRC32 | 设置本次新APP Expected CRC32 |
-| `0x10` | ERASE | 擦除APP |
-| `0x11` | WRITE | 建立写会话 |
-| `0x12` | READ | 读取内部Flash |
-| `0x13` | VERIFY | Legacy APP CRC32校验 |
-| `0x14` | WRITE_END | 首次广播结束/Bitmap扫描 |
-| `0x15` | MISSING_COUNT | 缺包数量 |
-| `0x16` | MISSING_ITEM | 缺失Sequence |
-| `0x17` | PROVIDER_GRANT | Legacy Host指定Provider |
-| `0x18` | ABORT | 中止 |
-| `0x19` | COORDINATOR_CLAIM | Coordinator声明 |
-| `0x1A` | PROVIDER_ASSIGN | 自治单包Provider指派 |
-| `0x1B` | PROVIDER_DONE | Provider完成 |
-| `0x1C` | REPAIR_ROUND_END | 请求新一轮Missing报告 |
-| `0x1D` | RECOVERY_READY | 自治恢复完成 |
-| `0x1E` | RECOVERY_FAILED | 自治恢复失败 |
-| `0x20` | JUMP_APP | Legacy验证后跳APP |
-| `0x21` | RESET | ACK后复位 |
-| `0x22` | VERIFY_REQUEST | Coordinator请求节点校验 |
-| `0x23` | VERIFY_RESULT | 节点返回校验结果 |
-| `0x24` | GUARD_UPDATE_BEGIN | 释放并准备更新Guard |
-| `0x25` | GUARD_UPDATE_READY | Guard擦除/准备完成 |
-| `0x26` | ROLLBACK_REQUEST | Coordinator请求Guard旧镜像元数据 |
-| `0x27` | ROLLBACK_SIZE_LO | 旧APP size低16位 |
-| `0x28` | ROLLBACK_SIZE_HI | 旧APP size高16位 |
-| `0x29` | ROLLBACK_CRC_LO | 旧APP CRC低16位 |
-| `0x2A` | ROLLBACK_CRC_HI | 旧APP CRC高16位 |
-| `0x2B` | ROLLBACK_BEGIN | 节点擦除并准备接收旧镜像 |
-| `0x2C` | ROLLBACK_PREPARED | 节点回滚准备完成 |
-| `0x2D` | FULL_STREAM | Provider发送完整镜像 |
-| `0x2E` | COMMIT_PREPARE | Prepare阶段 |
-| `0x2F` | COMMIT_ACK | 节点已具备提交条件 |
-| `0x30` | GET_STATUS | 状态/错误/进度 |
-| `0x31` | COMMIT_EXECUTE | Commit执行并统一跳APP |
+为便于 CANPro 调试和源码定位，V1.2 不再把所有命令只按数值排列，而是按用途分为 7 类。完整逐命令测试帧、可能接收、失败响应和判断方法见 [`COMMAND_TEST_GUIDE.md`](COMMAND_TEST_GUIDE.md)。
+
+### A. 基础查询 / Boot 控制
+
+| CMD | 名称 | 方向 | 直接回复 | 作用 |
+|---:|---|---|---|---|
+| `0x01` | GET_VERSION | Host→Node | RESPONSE | 查询 Bootloader 版本 |
+| `0x02` | GET_DEVICE_ID | Host→Node | RESPONSE | 读取 `DBGMCU->IDCODE` |
+| `0x03` | GET_INFO | Host→Node | RESPONSE | Node/HW/APP/Config 摘要 |
+| `0x04` | ENTER_BOOT | Host→Node | RESPONSE | 本次运行保持 Bootloader |
+| `0x18` | ABORT | Host→Node | RESPONSE | 取消异步任务并中止当前写会话 |
+| `0x20` | JUMP_APP | Host→Node | READY 后跳转 | 验证持久化 APP 后跳转 |
+| `0x21` | RESET | Host→Node | READY 后复位 | Flush TX 后系统复位 |
+| `0x30` | GET_STATUS | Host→Node | RESPONSE | 查询 Status/Error/Progress |
+
+### B. Session / Guard 配置
+
+| CMD | 名称 | 方向 | 直接回复 | 作用 |
+|---:|---|---|---|---|
+| `0x05` | SET_GUARD | Host→Nodes | 每节点 RESPONSE | 指定本次升级 Guard |
+| `0x06` | RELEASE_GUARD | Host→Nodes | 每节点 RESPONSE | 解除 Guard 角色 |
+| `0x07` | SESSION_BEGIN | Host→Nodes | 每节点 RESPONSE | 建立新升级事务并清理旧 RAM 状态 |
+| `0x08` | SESSION_CRC32 | Host→Nodes | 每节点 RESPONSE | 设置本次新 APP Expected CRC32 |
+
+### C. Flash 下载 / 读取 / Legacy 校验
+
+| CMD | 名称 | 方向 | 直接回复 | 作用 |
+|---:|---|---|---|---|
+| `0x10` | ERASE | Host→Node(s) | `ERASE` 后 `READY` | 擦除 APP，擦除前先使 metadata 失效 |
+| `0x11` | WRITE | Host→Node(s) | `WRITE` | 建立 APP/Config 写会话，返回总包数 |
+| `DATA 0x01` | WRITE_DATA | Host/Provider→Node(s) | 无逐包 ACK | 每个逻辑包携带 56B 固件数据 |
+| `0x12` | READ | Host→Node | 异步多帧 RESPONSE | 每帧返回最多 4B Flash 数据 |
+| `0x14` | WRITE_END | Host→Node(s) | `VERIFY/REPAIR/READY` | 结束首次广播并扫描 Bitmap |
+| `0x13` | VERIFY | Host→Node | RESPONSE | 仅 Legacy；CRC/向量通过后置 `app_valid=1` |
+
+### D. Legacy 缺包 / 人工 Provider
+
+| CMD | 名称 | 方向 | 直接回复 | 作用 |
+|---:|---|---|---|---|
+| `0x15` | MISSING_COUNT | Node→Host | 报告帧 | 缺包数量 + 总包数 |
+| `0x16` | MISSING_ITEM | Node→Host | 报告帧 | 逐个报告缺失 Sequence |
+| `0x17` | PROVIDER_GRANT | Host→Provider | `WRITE`，结束再 `READY` | Host 人工指定唯一 Provider 发送 Seq/Range |
+
+### E. 自治选主 / Provider / Repair
+
+| CMD | 名称 | 方向 | 直接回复 | 作用 |
+|---:|---|---|---|---|
+| `0x19` | COORDINATOR_CLAIM | Node→Nodes | 无 ACK | 最低有效 Node ID 声明 Coordinator |
+| `0x1A` | PROVIDER_ASSIGN | Coordinator→Provider | 无 ACK | 指派某一 Sequence 的 Provider |
+| `0x1B` | PROVIDER_DONE | Provider→Coordinator | 无 ACK | DATA 已 Flush，Provider 本次发送完成 |
+| `0x1C` | REPAIR_ROUND_END | Coordinator→Nodes | 无 ACK | 进入下一轮 Missing 重报 |
+| `0x1D` | RECOVERY_READY | Coordinator→Nodes | 无 ACK | 自治恢复阶段完成通知 |
+| `0x1E` | RECOVERY_FAILED | Coordinator→Nodes | 无 ACK | 自治恢复最终失败通知 |
+
+### F. 分布式 VERIFY / Guard / Rollback
+
+| CMD | 名称 | 方向 | 直接回复 | 作用 |
+|---:|---|---|---|---|
+| `0x22` | VERIFY_REQUEST | Coordinator→成员 | `VERIFY_RESULT` | 请求本地 CRC + 向量表校验 |
+| `0x23` | VERIFY_RESULT | 成员→Coordinator | 无二次 ACK | 返回 context + 成功/失败 |
+| `0x24` | GUARD_UPDATE_BEGIN | Coordinator→Guard | `GUARD_UPDATE_READY` | Guard 解除保护、擦除并准备接收新 APP |
+| `0x25` | GUARD_UPDATE_READY | Guard→Coordinator | 无二次 ACK | Guard 返回准备结果 |
+| `0x26` | ROLLBACK_REQUEST | Coordinator→Guard | 后续 4 个 metadata 帧 | 请求旧 APP size/CRC |
+| `0x27` | ROLLBACK_SIZE_LO | Guard→Nodes | 无 ACK | 旧 APP size 低 16 bit |
+| `0x28` | ROLLBACK_SIZE_HI | Guard→Nodes | 无 ACK | 旧 APP size 高 16 bit |
+| `0x29` | ROLLBACK_CRC_LO | Guard→Nodes | 无 ACK | 旧 APP CRC32 低 16 bit |
+| `0x2A` | ROLLBACK_CRC_HI | Guard→Nodes | 无 ACK | 旧 APP CRC32 高 16 bit |
+| `0x2B` | ROLLBACK_BEGIN | Coordinator→成员 | `ROLLBACK_PREPARED` | 普通节点擦除并准备接收旧镜像 |
+| `0x2C` | ROLLBACK_PREPARED | 成员→Coordinator | 无二次 ACK | 返回回滚准备结果 |
+| `0x2D` | FULL_STREAM | Coordinator→Provider | 无 ACK；随后 DATA | Provider 广播完整镜像 |
+
+### G. Prepare / Commit
+
+| CMD | 名称 | 方向 | 直接回复 | 作用 |
+|---:|---|---|---|---|
+| `0x2E` | COMMIT_PREPARE | Coordinator→成员 | `COMMIT_ACK` | 成员再次确认镜像可提交 |
+| `0x2F` | COMMIT_ACK | 成员→Coordinator | 无二次 ACK | 返回本地 Commit arm 结果 |
+| `0x31` | COMMIT_EXECUTE | Coordinator→成员 | 无 ACK | 重复广播 3 次；置 `app_valid=1` 后延时跳 APP |
+
+> `0x15/0x16` 在 Legacy 模式走 `Node→Host RESPONSE (0x50x)`；自治模式复用相同命令值，但走 `Node→Nodes PEER CONTROL (0x60x)`。`PROVIDER_ASSIGN/FULL_STREAM` 成功时不要等待 ACK，应观察后续 DATA 和最终 `PROVIDER_DONE`。
 
 ## 7. 自治升级流程
 
@@ -335,7 +386,7 @@ cmake --build --preset Release
 
 当前 V1.2 Release 已 clean build 通过。Linker 已锁定 `FLASH ORIGIN=0x08000000, LENGTH=20K`，超过 `0x08004FFF` 会直接链接失败。
 
-最近一次 Release：`FLASH 19132 B / 20 KiB (93.42%)`，`RAM 7624 B / 32 KiB (23.27%)`。
+最近一次 Release（加入安全 Jump RCC/外设清理后）：`FLASH 19324 B / 20 KiB (94.36%)`，`RAM 7624 B / 32 KiB (23.27%)`。
 ## 14. 自治模式总线流量约束
 
 V1.2 最终实现对 `WRITE_END` 后的 Missing 流量做了两点限制：

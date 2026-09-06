@@ -5,6 +5,8 @@
 > CAN 适配：`boot_port_can_stm32g4.c/.h`。
 > 帧生成：`bin_to_boot_frames.py`。
 > 本文档以当前源码实际实现为准。
+>
+> CANPro/总线逐命令实测帧、可能接收、失败响应与判断方法见 [`COMMAND_TEST_GUIDE.md`](COMMAND_TEST_GUIDE.md)。
 
 ## 1. V1.2 目标
 
@@ -536,8 +538,8 @@ cmake --build --preset Release --clean-first
 当前 V1.2 最近一次 clean build：
 
 ```text
-RAM   7608 B / 32 KiB   23.22%
-FLASH 19132 B / 20 KiB  93.42%
+RAM   7624 B / 32 KiB   23.27%
+FLASH 19324 B / 20 KiB  94.36%
 0 warning / 0 error
 ```
 
@@ -578,6 +580,21 @@ SCB->VTOR    = 0x08005000
 ```
 
 `.bin` 应直接由链接在 `0x08005000` 的 APP ELF 导出，不要人工在前面填 `0x5000` 个字节。
+
+### 26.1 Jump 前的时钟/外设清理
+
+Bootloader 与 APP 可以采用不同 PLL 参数。当前实机中 Bootloader 使用 170 MHz，`Observer_Motor` APP 使用 168 MHz。若 Bootloader 仍以 PLL 作为 SYSCLK 时直接进入 APP，APP 再调用 `HAL_RCC_OscConfig()` 修改 PLL 参数，STM32G4 HAL 会返回 `HAL_ERROR`，APP 会卡在 `Error_Handler()`。
+
+当前 `Boot_RuntimeJumpToApp()` 在真正设置 APP MSP 并执行 Reset_Handler 前执行：
+
+```c
+HAL_DeInit();
+HAL_RCC_DeInit();
+```
+
+随后关闭 SysTick、清 NVIC enable/pending、清 PendSV/SysTick pending，并把 VTOR 指向 `0x08005000`。这样 APP 从接近上电复位的 HSI/reset-like 状态重新执行 `HAL_Init()` / `SystemClock_Config()`。
+
+本修复已经通过单节点 CANPro 下载 + VERIFY + JUMP 实机验证。若以后 APP 与 Bootloader 使用完全相同的时钟参数，也仍建议保留该清理逻辑，以避免外设/中断残留跨镜像传播。
 
 ---
 

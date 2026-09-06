@@ -12,31 +12,8 @@
 #define BOOT_CAN_CONTROL_RX_ID     0x000U
 #define BOOT_CAN_DATA_ID           0x100U
 #define BOOT_CAN_RESPONSE_BASE_ID  0x500U
+#define BOOT_CAN_PEER_BASE_ID      0x600U
 #define BOOT_CAN_TX_FIFO_DEPTH     3U
-
-static uint8_t CanDlcToBytes(uint32_t dlc)
-{
-    switch (dlc)
-    {
-    case FDCAN_DLC_BYTES_0:  return 0U;
-    case FDCAN_DLC_BYTES_1:  return 1U;
-    case FDCAN_DLC_BYTES_2:  return 2U;
-    case FDCAN_DLC_BYTES_3:  return 3U;
-    case FDCAN_DLC_BYTES_4:  return 4U;
-    case FDCAN_DLC_BYTES_5:  return 5U;
-    case FDCAN_DLC_BYTES_6:  return 6U;
-    case FDCAN_DLC_BYTES_7:  return 7U;
-    case FDCAN_DLC_BYTES_8:  return 8U;
-    case FDCAN_DLC_BYTES_12: return 12U;
-    case FDCAN_DLC_BYTES_16: return 16U;
-    case FDCAN_DLC_BYTES_20: return 20U;
-    case FDCAN_DLC_BYTES_24: return 24U;
-    case FDCAN_DLC_BYTES_32: return 32U;
-    case FDCAN_DLC_BYTES_48: return 48U;
-    case FDCAN_DLC_BYTES_64: return 64U;
-    default: return 0U;
-    }
-}
 
 static uint32_t CanBytesToDlc(uint16_t len)
 {
@@ -67,6 +44,12 @@ static uint8_t g_classic_data_buffer[64];
 
 static uint8_t g_classic_data_active = 0U;
 static uint8_t g_classic_expected_fragment = 0U;
+
+/* Classic-only TX fallback for Provider DATA. One logical 64-byte message is
+ * staged here and drained by BootPort_CAN_Task() as IDs 0x100..0x107. */
+static uint8_t g_classic_tx_buffer[BOOT_DATA_SIZE];
+static uint8_t g_classic_tx_active = 0U;
+static uint8_t g_classic_tx_fragment = 0U;
 
 
 
@@ -100,9 +83,26 @@ uint8_t BootPort_CAN_Send(const Boot_Message_t *message, void *user)
     else if (message->type == (uint8_t)BOOT_MESSAGE_DATA)
     {
         if (message->len != BOOT_DATA_SIZE) return 0U;
+
+        if (hfdcan->Init.FrameFormat == FDCAN_FRAME_CLASSIC)
+        {
+            if (g_classic_tx_active != 0U) return 0U;
+            memcpy(g_classic_tx_buffer, message->data, BOOT_DATA_SIZE);
+            g_classic_tx_fragment = 0U;
+            g_classic_tx_active = 1U;
+            return 1U;
+        }
+
         tx.Identifier = BOOT_CAN_DATA_ID;
         tx.BitRateSwitch = FDCAN_BRS_ON;
         tx.FDFormat = FDCAN_FD_CAN;
+    }
+    else if (message->type == (uint8_t)BOOT_MESSAGE_PEER_CONTROL)
+    {
+        if (message->len != BOOT_CONTROL_SIZE) return 0U;
+        tx.Identifier = BOOT_CAN_PEER_BASE_ID + Boot_GetNodeId();
+        tx.BitRateSwitch = FDCAN_BRS_OFF;
+        tx.FDFormat = FDCAN_CLASSIC_CAN;
     }
     else
     {
@@ -113,14 +113,46 @@ uint8_t BootPort_CAN_Send(const Boot_Message_t *message, void *user)
                                            (uint8_t *)message->data) == HAL_OK) ? 1U : 0U;
 }
 
+void BootPort_CAN_Task(void *user)
+{
+    FDCAN_HandleTypeDef *hfdcan = (FDCAN_HandleTypeDef *)user;
+    FDCAN_TxHeaderTypeDef tx = {0};
+
+    if ((hfdcan == NULL) || (g_classic_tx_active == 0U)) return;
+    if (HAL_FDCAN_GetTxFifoFreeLevel(hfdcan) == 0U) return;
+
+    tx.Identifier = BOOT_CAN_DATA_ID + g_classic_tx_fragment;
+    tx.IdType = FDCAN_STANDARD_ID;
+    tx.TxFrameType = FDCAN_DATA_FRAME;
+    tx.DataLength = FDCAN_DLC_BYTES_8;
+    tx.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+    tx.BitRateSwitch = FDCAN_BRS_OFF;
+    tx.FDFormat = FDCAN_CLASSIC_CAN;
+    tx.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+    tx.MessageMarker = 0U;
+
+    if (HAL_FDCAN_AddMessageToTxFifoQ(
+            hfdcan, &tx, &g_classic_tx_buffer[(uint32_t)g_classic_tx_fragment * 8U]) == HAL_OK)
+    {
+        g_classic_tx_fragment++;
+        if (g_classic_tx_fragment >= 8U)
+        {
+            g_classic_tx_fragment = 0U;
+            g_classic_tx_active = 0U;
+        }
+    }
+}
+
 void BootPort_CAN_Flush(void *user, uint32_t timeout_ms)
 {
     FDCAN_HandleTypeDef *hfdcan = (FDCAN_HandleTypeDef *)user;
     uint32_t start = HAL_GetTick();
     if (hfdcan == NULL) return;
 
-    while (HAL_FDCAN_GetTxFifoFreeLevel(hfdcan) < BOOT_CAN_TX_FIFO_DEPTH)
+    while ((HAL_FDCAN_GetTxFifoFreeLevel(hfdcan) < BOOT_CAN_TX_FIFO_DEPTH) ||
+           (g_classic_tx_active != 0U))
     {
+        BootPort_CAN_Task(hfdcan);
         if ((HAL_GetTick() - start) >= timeout_ms) break;
     }
 }
@@ -267,6 +299,26 @@ static void BootPort_CAN_ProcessClassicDataFragment(
         }
 
         /* =========================
+         * PEER CONTROL: Node -> Nodes, ID 0x601..0x608.
+         * Byte2 always carries the source Node ID and is checked here.
+         * ========================= */
+        if ((rx_header.FDFormat == FDCAN_CLASSIC_CAN) &&
+            (rx_header.Identifier >= (BOOT_CAN_PEER_BASE_ID + 1U)) &&
+            (rx_header.Identifier <= (BOOT_CAN_PEER_BASE_ID + BOOT_MAX_NODE_NUM)) &&
+            (rx_header.DataLength == FDCAN_DLC_BYTES_8))
+        {
+            uint8_t source = (uint8_t)(rx_header.Identifier - BOOT_CAN_PEER_BASE_ID);
+            if (data[2] == source)
+            {
+                message.type = BOOT_MESSAGE_PEER_CONTROL;
+                message.len = 8U;
+                memcpy(message.data, data, 8U);
+                Boot_Input(&message);
+            }
+            continue;
+        }
+
+        /* =========================
          * DATA - native CAN FD
          * ========================= */
 
@@ -324,6 +376,15 @@ void BootPort_CAN_Filter_Init() {
   if (HAL_FDCAN_ConfigFilter(&hfdcan1, &filter) != HAL_OK) {
     Error_Handler();
   }
+
+  /* 0x601~0x608 peer-control. Mask admits 0x600~0x60F; adapter checks exact range. */
+  filter.FilterIndex = 2;
+  filter.FilterID1 = 0x600;
+  filter.FilterID2 = 0x7F0;
+  if (HAL_FDCAN_ConfigFilter(&hfdcan1, &filter) != HAL_OK) {
+    Error_Handler();
+  }
+
   if (HAL_FDCAN_ConfigGlobalFilter(
         &hfdcan1,
         FDCAN_REJECT,

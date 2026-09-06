@@ -74,6 +74,17 @@ static uint8_t Boot_SendData(const uint8_t *data, uint16_t len)
     return Boot_Output(&message);
 }
 
+static uint8_t Boot_SendPeerControl(const uint8_t *data, uint16_t len)
+{
+    Boot_Message_t message;
+    if ((data == NULL) || (len != BOOT_CONTROL_SIZE)) return 0U;
+    memset(&message, 0, sizeof(message));
+    message.type = (uint8_t)BOOT_MESSAGE_PEER_CONTROL;
+    message.len = len;
+    memcpy(message.data, data, len);
+    return Boot_Output(&message);
+}
+
 static void Boot_FlushTx(uint32_t timeout_ms)
 {
     if (g_flush_cb != NULL)
@@ -678,42 +689,20 @@ static uint8_t Boot_RuntimeVectorTableValid(void)
     return 1U;
 }
 
+static uint8_t Boot_RuntimeValidateImage(uint32_t app_size, uint32_t app_crc32)
+{
+    if ((app_size == 0U) || (app_size > BOOT_APP_MAX_SIZE)) return 0U;
+    if (Boot_RuntimeVectorTableValid() == 0U) return 0U;
+    return (Boot_CRC32((const uint8_t *)BOOT_APP_START_ADDR, app_size) == app_crc32) ? 1U : 0U;
+}
+
 static uint8_t Boot_RuntimeValidatePersistedApp(Boot_Config_t *cfg_out)
 {
     Boot_Config_t cfg;
-    uint32_t crc;
-
-    if (Boot_ConfigLoad(&cfg) == 0U)
-    {
-        return 0U;
-    }
-
-    if (cfg.app_valid == 0U)
-    {
-        return 0U;
-    }
-
-    if ((cfg.app_size == 0U) || (cfg.app_size > BOOT_APP_MAX_SIZE))
-    {
-        return 0U;
-    }
-
-    if (Boot_RuntimeVectorTableValid() == 0U)
-    {
-        return 0U;
-    }
-
-    crc = Boot_CRC32((const uint8_t *)BOOT_APP_START_ADDR, cfg.app_size);
-    if (crc != cfg.app_crc32)
-    {
-        return 0U;
-    }
-
-    if (cfg_out != NULL)
-    {
-        *cfg_out = cfg;
-    }
-
+    if (Boot_ConfigLoad(&cfg) == 0U) return 0U;
+    if (cfg.app_valid == 0U) return 0U;
+    if (Boot_RuntimeValidateImage(cfg.app_size, cfg.app_crc32) == 0U) return 0U;
+    if (cfg_out != NULL) *cfg_out = cfg;
     return 1U;
 }
 
@@ -726,11 +715,19 @@ static void Boot_RuntimeJumpToApp(void)
     uint32_t i;
     AppEntry_t entry = (AppEntry_t)(uintptr_t)app_reset;
 
+    /* Restore a reset-like clock/peripheral state before handing control to
+     * the APP. The Bootloader runs from a different PLL configuration than
+     * Observer_Motor; HAL_RCC_OscConfig() refuses to reconfigure a PLL while
+     * that PLL is still the active SYSCLK source. */
+    (void)HAL_DeInit();
+    (void)HAL_RCC_DeInit();
+
     __disable_irq();
 
     SysTick->CTRL = 0U;
     SysTick->LOAD = 0U;
     SysTick->VAL = 0U;
+    SCB->ICSR = SCB_ICSR_PENDSTCLR_Msk | SCB_ICSR_PENDSVCLR_Msk;
 
     for (i = 0U; i < 8U; ++i)
     {
@@ -794,6 +791,70 @@ static uint8_t g_provider_done_pending = 0U;
 static uint8_t g_provider_target = 0U;
 static uint16_t g_provider_next_seq = 0U;
 static uint16_t g_provider_remaining = 0U;
+static uint8_t g_provider_peer_mode = 0U;
+static uint16_t g_provider_peer_seq = 0U;
+
+static uint8_t g_session_active = 0U;
+static uint8_t g_session_flags = 0U;
+static uint16_t g_session_id = 0U;
+static uint32_t g_session_image_size = 0U;
+static uint32_t g_session_expected_crc32 = 0U;
+static uint8_t g_session_crc_valid = 0U;
+
+static uint8_t g_peer_active_bitmap = 0U;
+static uint8_t g_peer_report_complete_bitmap = 0U;
+static uint8_t g_peer_missing_bitmap[BOOT_MAX_NODE_NUM][BOOT_BITMAP_SIZE_BYTES];
+static uint16_t g_peer_missing_expected[BOOT_MAX_NODE_NUM];
+static uint16_t g_peer_missing_received[BOOT_MAX_NODE_NUM];
+static uint8_t g_peer_report_tx_active = 0U;
+static uint8_t g_peer_report_tx_count_sent = 0U;
+static uint16_t g_peer_report_tx_scan_seq = 0U;
+static uint16_t g_peer_report_tx_item_count = 0U;
+static uint32_t g_peer_report_items_after_ms = 0U;
+static uint8_t g_peer_recovery_started = 0U;
+static uint8_t g_election_pending = 0U;
+static uint32_t g_election_started_ms = 0U;
+static uint8_t g_coordinator_id = 0U;
+static uint8_t g_is_coordinator = 0U;
+static uint8_t g_recovery_members_bitmap = 0U;
+static uint8_t g_repair_round = 0U;
+static uint16_t g_coord_scan_seq = 0U;
+static uint16_t g_coord_current_seq = 0U;
+static uint8_t g_coord_provider_id = 0U;
+static uint8_t g_coord_wait_provider = 0U;
+static uint8_t g_provider_failed_bitmap = 0U;
+static uint32_t g_provider_wait_started_ms = 0U;
+static uint8_t g_coord_sweep_had_missing = 0U;
+static uint8_t g_coord_terminal = 0U;
+static uint8_t g_primary_members_bitmap = 0U;
+static Boot_RecoveryPhase_t g_recovery_phase = BOOT_RECOVERY_PHASE_IDLE;
+static uint32_t g_phase_started_ms = 0U;
+
+static uint8_t g_verify_response_bitmap = 0U;
+static uint8_t g_verify_ok_bitmap = 0U;
+static uint8_t g_verify_context = 0U;
+static uint32_t g_prepared_app_size = 0U;
+static uint32_t g_prepared_app_crc32 = 0U;
+static uint8_t g_local_image_prepared = 0U;
+
+static uint32_t g_rollback_size = 0U;
+static uint32_t g_rollback_crc32 = 0U;
+static uint8_t g_rollback_meta_mask = 0U;
+static uint8_t g_guard_meta_tx_stage = 0U;
+static uint8_t g_rollback_prepared_bitmap = 0U;
+
+static uint8_t g_commit_expected_bitmap = 0U;
+static uint8_t g_commit_ack_bitmap = 0U;
+static uint8_t g_commit_armed = 0U;
+static uint8_t g_commit_tx_remaining = 0U;
+static uint8_t g_commit_execute_received = 0U;
+static uint32_t g_commit_due_ms = 0U;
+
+static void Boot_StartRollback(void);
+static void Boot_StartCommit(void);
+static void Boot_StartVerifyContext(uint8_t context);
+static void Boot_CoordinatorProviderDone(uint16_t value);
+static void Boot_CoordinatorPhaseFailure(void);
 
 static uint32_t Boot_ReadU32LE(const uint8_t *p)
 {
@@ -820,6 +881,124 @@ static void Boot_WriteU32LE(uint8_t *p, uint32_t value)
     p[1] = (uint8_t)((value >> 8U) & 0xFFU);
     p[2] = (uint8_t)((value >> 16U) & 0xFFU);
     p[3] = (uint8_t)((value >> 24U) & 0xFFU);
+}
+
+static uint8_t Boot_NodeBit(uint8_t node_id)
+{
+    if ((node_id < 1U) || (node_id > BOOT_MAX_NODE_NUM)) return 0U;
+    return (uint8_t)(1U << (node_id - 1U));
+}
+
+static uint8_t Boot_PeerMissingGet(uint8_t node_id, uint16_t seq)
+{
+    uint8_t index;
+    if ((node_id < 1U) || (node_id > BOOT_MAX_NODE_NUM) ||
+        ((uint32_t)seq >= BOOT_MAX_PACKET_COUNT)) return 1U;
+    index = (uint8_t)(node_id - 1U);
+    return (uint8_t)((g_peer_missing_bitmap[index][seq >> 3U] >> (seq & 7U)) & 0x01U);
+}
+
+static void Boot_PeerMissingSet(uint8_t node_id, uint16_t seq)
+{
+    uint8_t index;
+    if ((node_id < 1U) || (node_id > BOOT_MAX_NODE_NUM) ||
+        ((uint32_t)seq >= BOOT_MAX_PACKET_COUNT)) return;
+    index = (uint8_t)(node_id - 1U);
+    g_peer_missing_bitmap[index][seq >> 3U] |= (uint8_t)(1U << (seq & 7U));
+}
+
+static uint8_t Boot_SendPeerFrame(uint8_t target, uint8_t cmd, uint8_t source,
+                                  uint16_t session, uint16_t value)
+{
+    Boot_ControlFrame_t frame;
+    memset(&frame, 0, sizeof(frame));
+    frame.target = target;
+    frame.cmd = cmd;
+    frame.seq = source;
+    Boot_WriteU16LE(&frame.param[0], session);
+    Boot_WriteU16LE(&frame.param[2], value);
+    frame.crc = Boot_CRC8((const uint8_t *)&frame, 7U);
+    return Boot_SendPeerControl((const uint8_t *)&frame, BOOT_CONTROL_SIZE);
+}
+
+static void Boot_BitmapClear(void);
+static uint16_t Boot_MissingCount(void);
+static void Boot_CancelAsyncTasks(void);
+
+static uint8_t Boot_PrepareAppWriteInternal(uint32_t size)
+{
+    uint32_t packets;
+    if ((size == 0U) || (size > BOOT_APP_MAX_SIZE)) return 0U;
+    packets = (size + BOOT_DATA_PAYLOAD_SIZE - 1UL) / BOOT_DATA_PAYLOAD_SIZE;
+    if ((packets == 0U) || (packets > BOOT_MAX_PACKET_COUNT)) return 0U;
+
+    Boot_CancelAsyncTasks();
+    Boot_StorageConfigStageAbort();
+    g_app_erased = 0U;
+    g_progress = 0U;
+    if (Boot_StorageInvalidateApp(g_node_id) == 0U) return 0U;
+    g_app_valid = 0U;
+    g_config_valid = Boot_ConfigLoad(&g_config);
+    if (Boot_StorageEraseApp() == 0U) return 0U;
+
+    Boot_BitmapClear();
+    g_app_erased = 1U;
+    g_write_active = 1U;
+    g_write_region = BOOT_WRITE_REGION_APP;
+    g_write_size = size;
+    g_total_packets = (uint16_t)packets;
+    g_status = BOOT_STATUS_WRITE;
+    g_last_error = BOOT_ERR_NONE;
+    g_local_image_prepared = 0U;
+    return 1U;
+}
+
+static uint8_t Boot_PrepareVerifiedImage(uint32_t expected_crc)
+{
+    uint32_t actual_crc;
+    if ((g_write_active == 0U) || (g_write_region != BOOT_WRITE_REGION_APP) ||
+        (Boot_MissingCount() != 0U) || (g_write_size == 0U)) return 0U;
+    actual_crc = Boot_CRC32((const uint8_t *)BOOT_APP_START_ADDR, g_write_size);
+    if (actual_crc != expected_crc) { g_last_error = BOOT_ERR_CRC_MISMATCH; return 0U; }
+    if (Boot_RuntimeValidateImage(g_write_size, actual_crc) == 0U) { g_last_error = BOOT_ERR_APP_INVALID; return 0U; }
+    /* Autonomous mode is prepare/commit: verified image remains non-bootable until COMMIT_EXECUTE. */
+    if (Boot_StorageSaveAppMetadata(g_write_size, actual_crc, 0U) == 0U) { g_last_error = BOOT_ERR_CONFIG; return 0U; }
+    g_config_valid = Boot_ConfigLoad(&g_config);
+    if (g_config_valid == 0U) { g_last_error = BOOT_ERR_CONFIG; return 0U; }
+    g_app_valid = 0U;
+    g_prepared_app_size = g_write_size;
+    g_prepared_app_crc32 = actual_crc;
+    g_local_image_prepared = 1U;
+    g_status = BOOT_STATUS_READY;
+    return 1U;
+}
+
+static uint8_t Boot_ArmCommitLocal(void)
+{
+    if (g_local_image_prepared != 0U)
+    {
+        if (Boot_RuntimeValidateImage(g_prepared_app_size, g_prepared_app_crc32) == 0U) return 0U;
+    }
+    else if (Boot_RuntimeValidatePersistedApp(&g_config) != 0U)
+    {
+        g_prepared_app_size = g_config.app_size;
+        g_prepared_app_crc32 = g_config.app_crc32;
+    }
+    else return 0U;
+    g_commit_armed = 1U;
+    return 1U;
+}
+
+static uint8_t Boot_ExecuteCommitLocal(void)
+{
+    if (g_commit_armed == 0U) return 0U;
+    if (Boot_StorageSaveAppMetadata(g_prepared_app_size, g_prepared_app_crc32, 1U) == 0U) return 0U;
+    if (Boot_ConfigLoad(&g_config) == 0U) return 0U;
+    g_config_valid = 1U;
+    g_app_valid = 1U;
+    g_commit_execute_received = 1U;
+    g_commit_due_ms = HAL_GetTick() + BOOT_COMMIT_DELAY_MS;
+    return 1U;
 }
 
 static void Boot_SetError(Boot_Error_t error, uint8_t fatal)
@@ -899,6 +1078,7 @@ static void Boot_CancelAsyncTasks(void)
     g_missing_count_sent = 0U;
     g_provider_active = 0U;
     g_provider_done_pending = 0U;
+    g_provider_peer_mode = 0U;
 }
 
 static uint8_t Boot_ProviderPacketAvailable(uint16_t seq, uint32_t *source_size)
@@ -970,7 +1150,9 @@ static uint8_t Boot_BuildProviderFrame(uint16_t seq,
     frame[0] = target;
     frame[1] = BOOT_DATA_CMD_WRITE;
     Boot_WriteU16LE(&frame[2], seq);
-    /* Byte4..7 reserved for future protocol extensions. */
+    Boot_WriteU16LE(&frame[4], (g_session_active != 0U) ? g_session_id : 0U);
+    frame[6] = 0U;
+    frame[7] = 0U;
 
     memcpy(&frame[8],
            (const void *)(BOOT_APP_START_ADDR + offset),
@@ -986,6 +1168,199 @@ static void Boot_StartMissingReport(void)
     g_missing_count_sent = 0U;
     g_missing_scan_seq = 0U;
     g_missing_item_index = 0U;
+}
+
+static void Boot_ResetPeerRecoveryState(void)
+{
+    memset(g_peer_missing_bitmap, 0, sizeof(g_peer_missing_bitmap));
+    memset(g_peer_missing_expected, 0, sizeof(g_peer_missing_expected));
+    memset(g_peer_missing_received, 0, sizeof(g_peer_missing_received));
+    g_peer_active_bitmap = 0U;
+    g_peer_report_complete_bitmap = 0U;
+    g_peer_report_tx_active = 0U;
+    g_peer_report_tx_count_sent = 0U;
+    g_peer_report_tx_scan_seq = 0U;
+    g_peer_report_tx_item_count = 0U;
+    g_peer_report_items_after_ms = 0U;
+    g_peer_recovery_started = 0U;
+    g_election_pending = 0U;
+    g_election_started_ms = 0U;
+    g_coordinator_id = 0U;
+    g_is_coordinator = 0U;
+    g_recovery_members_bitmap = 0U;
+    g_repair_round = 0U;
+    g_coord_scan_seq = 0U;
+    g_coord_current_seq = 0U;
+    g_coord_provider_id = 0U;
+    g_coord_wait_provider = 0U;
+    g_provider_failed_bitmap = 0U;
+    g_provider_wait_started_ms = 0U;
+    g_coord_sweep_had_missing = 0U;
+    g_coord_terminal = 0U;
+    g_primary_members_bitmap = 0U;
+    g_recovery_phase = BOOT_RECOVERY_PHASE_IDLE;
+    g_phase_started_ms = 0U;
+    g_verify_response_bitmap = 0U;
+    g_verify_ok_bitmap = 0U;
+    g_verify_context = 0U;
+    g_prepared_app_size = 0U;
+    g_prepared_app_crc32 = 0U;
+    g_local_image_prepared = 0U;
+    g_rollback_size = 0U;
+    g_rollback_crc32 = 0U;
+    g_rollback_meta_mask = 0U;
+    g_guard_meta_tx_stage = 0U;
+    g_rollback_prepared_bitmap = 0U;
+    g_commit_expected_bitmap = 0U;
+    g_commit_ack_bitmap = 0U;
+    g_commit_armed = 0U;
+    g_commit_tx_remaining = 0U;
+    g_commit_execute_received = 0U;
+    g_commit_due_ms = 0U;
+}
+
+static void Boot_CaptureSelfMissing(void)
+{
+    uint8_t self_index = (uint8_t)(g_node_id - 1U);
+    uint16_t seq;
+    uint16_t count = 0U;
+    memset(g_peer_missing_bitmap[self_index], 0, sizeof(g_peer_missing_bitmap[self_index]));
+    for (seq = 0U; seq < g_total_packets; ++seq)
+    {
+        if (Boot_BitmapGet(seq) == 0U)
+        {
+            Boot_PeerMissingSet(g_node_id, seq);
+            count++;
+        }
+    }
+    g_peer_missing_expected[self_index] = count;
+    g_peer_missing_received[self_index] = count;
+    g_peer_active_bitmap |= Boot_NodeBit(g_node_id);
+    g_peer_report_complete_bitmap |= Boot_NodeBit(g_node_id);
+}
+
+static void Boot_StartPeerMissingReport(void)
+{
+    Boot_CaptureSelfMissing();
+    g_peer_report_tx_active = 1U;
+    g_peer_report_tx_count_sent = 0U;
+    g_peer_report_tx_scan_seq = 0U;
+    g_peer_report_tx_item_count = 0U;
+    g_peer_report_items_after_ms = HAL_GetTick() + BOOT_PEER_MISSING_ITEM_DELAY_MS;
+}
+
+static void Boot_ClearRemoteReportsForNextRound(void)
+{
+    uint8_t self_bit = Boot_NodeBit(g_node_id);
+    memset(g_peer_missing_bitmap, 0, sizeof(g_peer_missing_bitmap));
+    memset(g_peer_missing_expected, 0, sizeof(g_peer_missing_expected));
+    memset(g_peer_missing_received, 0, sizeof(g_peer_missing_received));
+    g_peer_report_complete_bitmap = 0U;
+    if ((g_recovery_members_bitmap & self_bit) != 0U)
+    {
+        Boot_CaptureSelfMissing();
+    }
+}
+
+static void Boot_StartPeerElection(void)
+{
+    if ((g_session_active == 0U) ||
+        ((g_session_flags & BOOT_SESSION_FLAG_PEER_RECOVERY) == 0U) ||
+        (g_write_active == 0U) ||
+        (g_write_region != BOOT_WRITE_REGION_APP) ||
+        (Boot_IsGuardProtected() != 0U) ||
+        (g_peer_recovery_started != 0U)) return;
+    g_peer_recovery_started = 1U;
+    g_recovery_phase = BOOT_RECOVERY_PHASE_NEW_REPAIR;
+    g_phase_started_ms = HAL_GetTick();
+    Boot_StartPeerMissingReport();
+    g_election_pending = 1U;
+    g_election_started_ms = HAL_GetTick();
+}
+
+static uint8_t Boot_AllPeerReportsComplete(void)
+{
+    return ((g_peer_report_complete_bitmap & g_recovery_members_bitmap) == g_recovery_members_bitmap) ? 1U : 0U;
+}
+
+static uint8_t Boot_AnyMemberMissing(uint16_t seq)
+{
+    uint8_t node;
+    for (node = 1U; node <= BOOT_MAX_NODE_NUM; ++node)
+        if (((g_recovery_members_bitmap & Boot_NodeBit(node)) != 0U) && (Boot_PeerMissingGet(node, seq) != 0U)) return 1U;
+    return 0U;
+}
+
+static uint8_t Boot_SelectProvider(uint16_t seq)
+{
+    uint8_t node;
+    uint8_t candidates = (g_primary_members_bitmap != 0U) ? g_primary_members_bitmap : g_recovery_members_bitmap;
+
+    if ((g_recovery_phase == BOOT_RECOVERY_PHASE_ROLLBACK_REPAIR) &&
+        (g_guard_active != 0U) && (g_guard_node_id >= 1U) &&
+        (g_guard_node_id <= BOOT_MAX_NODE_NUM))
+    {
+        if ((g_provider_failed_bitmap & Boot_NodeBit(g_guard_node_id)) != 0U) return 0U;
+        return g_guard_node_id;
+    }
+
+    for (node = 1U; node <= BOOT_MAX_NODE_NUM; ++node)
+    {
+        uint8_t bit = Boot_NodeBit(node);
+        if ((candidates & bit) == 0U) continue;
+        if ((g_provider_failed_bitmap & bit) != 0U) continue;
+        if ((g_guard_active != 0U) && (node == g_guard_node_id)) continue;
+        if ((g_verify_ok_bitmap & bit) != 0U) return node;
+        if (Boot_PeerMissingGet(node, seq) == 0U) return node;
+    }
+    return 0U;
+}
+
+static void Boot_HandleSessionBegin(const Boot_ControlFrame_t *frame)
+{
+    uint8_t data[4] = {0};
+    uint16_t session = Boot_ReadU16LE(&frame->param[0]);
+    if (session == 0U)
+    {
+        Boot_SendError(frame->cmd, BOOT_ERR_SESSION);
+        return;
+    }
+    Boot_CancelAsyncTasks();
+    Boot_StorageConfigStageAbort();
+    g_write_active = 0U;
+    g_app_erased = 0U;
+    g_write_size = 0U;
+    g_total_packets = 0U;
+    Boot_BitmapClear();
+    g_guard_active = 0U;
+    g_guard_node_id = 0U;
+    g_is_guard = 0U;
+    g_status = BOOT_STATUS_IDLE;
+    g_last_error = BOOT_ERR_NONE;
+    g_session_active = 1U;
+    g_session_flags = frame->seq;
+    g_session_id = session;
+    g_session_image_size = 0U;
+    g_session_expected_crc32 = 0U;
+    g_session_crc_valid = 0U;
+    Boot_ResetPeerRecoveryState();
+    Boot_WriteU16LE(&data[0], g_session_id);
+    data[2] = g_session_flags;
+    (void)Boot_SendResponse(frame->cmd, BOOT_STATUS_READY, data);
+}
+
+static void Boot_HandleSessionCrc32(const Boot_ControlFrame_t *frame)
+{
+    uint8_t data[4];
+    if (g_session_active == 0U)
+    {
+        Boot_SendError(frame->cmd, BOOT_ERR_SESSION);
+        return;
+    }
+    g_session_expected_crc32 = Boot_ReadU32LE(frame->param);
+    g_session_crc_valid = 1U;
+    Boot_WriteU32LE(data, g_session_expected_crc32);
+    (void)Boot_SendResponse(frame->cmd, BOOT_STATUS_READY, data);
 }
 
 static void Boot_HandleGetVersion(uint8_t cmd)
@@ -1134,6 +1509,11 @@ static void Boot_HandleWrite(const Boot_ControlFrame_t *frame)
     uint32_t size = Boot_ReadU32LE(frame->param);
     uint32_t packets;
 
+    if ((region == BOOT_WRITE_REGION_APP) && (size > 0U) && (size <= BOOT_APP_MAX_SIZE))
+    {
+        g_session_image_size = size;
+    }
+
     if (Boot_IsGuardProtected() != 0U)
     {
         g_status = BOOT_STATUS_GUARD;
@@ -1240,6 +1620,13 @@ static void Boot_HandleVerify(const Boot_ControlFrame_t *frame)
     uint32_t expected_crc;
     uint32_t actual_crc;
 
+    if ((g_session_active != 0U) &&
+        ((g_session_flags & BOOT_SESSION_FLAG_COORD_COMMIT) != 0U))
+    {
+        Boot_SendError(frame->cmd, BOOT_ERR_BAD_STATE);
+        return;
+    }
+
     if (Boot_IsGuardProtected() != 0U)
     {
         g_status = BOOT_STATUS_GUARD;
@@ -1273,6 +1660,12 @@ static void Boot_HandleVerify(const Boot_ControlFrame_t *frame)
         return;
     }
 
+    if (Boot_RuntimeValidateImage(g_write_size, actual_crc) == 0U)
+    {
+        Boot_SendError(frame->cmd, BOOT_ERR_APP_INVALID);
+        return;
+    }
+
     if (Boot_StorageSaveAppMetadata(g_write_size, actual_crc, 1U) == 0U)
     {
         Boot_SendError(frame->cmd, BOOT_ERR_CONFIG);
@@ -1300,6 +1693,7 @@ static void Boot_HandleWriteEnd(const Boot_ControlFrame_t *frame)
 {
     uint8_t data[4] = {0};
     uint16_t missing;
+    uint8_t autonomous;
 
     if (Boot_IsGuardProtected() != 0U)
     {
@@ -1316,11 +1710,20 @@ static void Boot_HandleWriteEnd(const Boot_ControlFrame_t *frame)
 
     missing = Boot_MissingCount();
     Boot_WriteU16LE(data, missing);
+    autonomous = ((frame->target == BOOT_BROADCAST_ID) &&
+                  (g_session_active != 0U) &&
+                  ((g_session_flags & BOOT_SESSION_FLAG_PEER_RECOVERY) != 0U)) ? 1U : 0U;
+
+    /* Peer election is intentionally delayed until the first broadcast ends. */
+    if (frame->target == BOOT_BROADCAST_ID)
+    {
+        Boot_StartPeerElection();
+    }
 
     if (missing != 0U)
     {
         g_status = BOOT_STATUS_REPAIR;
-        Boot_StartMissingReport();
+        if (autonomous == 0U) Boot_StartMissingReport();
         (void)Boot_SendResponse(frame->cmd, BOOT_STATUS_REPAIR, data);
         return;
     }
@@ -1352,7 +1755,7 @@ static void Boot_HandleWriteEnd(const Boot_ControlFrame_t *frame)
 
     g_status = BOOT_STATUS_VERIFY;
     g_progress = 100U;
-    Boot_StartMissingReport(); /* Sends MISSING_COUNT = 0. */
+    if (autonomous == 0U) Boot_StartMissingReport(); /* Legacy Host report. */
     (void)Boot_SendResponse(frame->cmd, BOOT_STATUS_VERIFY, data);
 }
 
@@ -1407,6 +1810,7 @@ static void Boot_HandleProviderGrant(const Boot_ControlFrame_t *frame)
     g_provider_remaining = count;
     g_provider_active = 1U;
     g_provider_done_pending = 0U;
+    g_provider_peer_mode = 0U;
 
     data[0] = data_target;
     Boot_WriteU16LE(&data[1], start_seq);
@@ -1495,6 +1899,10 @@ static void Boot_CoreInit(uint8_t default_node_id)
     g_write_active = 0U;
     g_write_size = 0U;
     g_total_packets = 0U;
+    g_session_active = 0U;
+    g_session_flags = 0U;
+    g_session_id = 0U;
+    Boot_ResetPeerRecoveryState();
     g_progress = 0U;
     g_last_error = BOOT_ERR_NONE;
     g_status = BOOT_STATUS_IDLE;
@@ -1568,6 +1976,14 @@ static void Boot_ProcessControl(const uint8_t *data, uint8_t len)
         Boot_HandleReleaseGuard(&frame);
         break;
 
+    case BOOT_CMD_SESSION_BEGIN:
+        Boot_HandleSessionBegin(&frame);
+        break;
+
+    case BOOT_CMD_SESSION_CRC32:
+        Boot_HandleSessionCrc32(&frame);
+        break;
+
     case BOOT_CMD_ERASE:
         Boot_HandleErase(frame.cmd);
         break;
@@ -1616,6 +2032,456 @@ static void Boot_ProcessControl(const uint8_t *data, uint8_t len)
     }
 }
 
+static uint8_t Boot_SelectVerifiedProvider(void)
+{
+    uint8_t node;
+    for (node = 1U; node <= BOOT_MAX_NODE_NUM; ++node)
+    {
+        uint8_t bit = Boot_NodeBit(node);
+        if (((g_primary_members_bitmap & bit) != 0U) && ((g_verify_ok_bitmap & bit) != 0U)) return node;
+    }
+    return 0U;
+}
+
+static uint8_t Boot_VerifyLocalForContext(uint8_t context)
+{
+    if (context == (uint8_t)BOOT_RECOVERY_PHASE_ROLLBACK_VERIFY)
+    {
+        return Boot_PrepareVerifiedImage(g_rollback_crc32);
+    }
+    if ((context == (uint8_t)BOOT_RECOVERY_PHASE_NEW_VERIFY) ||
+        (context == (uint8_t)BOOT_RECOVERY_PHASE_GUARD_UPDATE))
+    {
+        if (g_session_crc_valid == 0U) return 0U;
+        return Boot_PrepareVerifiedImage(g_session_expected_crc32);
+    }
+    return 0U;
+}
+
+static void Boot_FinalRecoveryFailure(void)
+{
+    g_coord_terminal = 1U;
+    g_recovery_phase = BOOT_RECOVERY_PHASE_FAILED;
+    g_status = BOOT_STATUS_ERROR;
+    g_last_error = BOOT_ERR_RECOVERY_FAILED;
+    (void)Boot_SendPeerFrame(BOOT_BROADCAST_ID, BOOT_CMD_RECOVERY_FAILED,
+                             g_node_id, g_session_id, g_repair_round);
+}
+
+static void Boot_StartRollback(void)
+{
+    if (((g_session_flags & BOOT_SESSION_FLAG_GUARD_ROLLBACK) == 0U) ||
+        (g_guard_active == 0U) || (g_guard_node_id < 1U) ||
+        (g_guard_node_id > BOOT_MAX_NODE_NUM))
+    {
+        Boot_FinalRecoveryFailure();
+        return;
+    }
+    g_recovery_phase = BOOT_RECOVERY_PHASE_ROLLBACK_META;
+    g_phase_started_ms = HAL_GetTick();
+    g_rollback_meta_mask = 0U;
+    g_rollback_size = 0U;
+    g_rollback_crc32 = 0U;
+    g_rollback_prepared_bitmap = 0U;
+    g_verify_response_bitmap = 0U;
+    g_verify_ok_bitmap = 0U;
+    g_coord_wait_provider = 0U;
+    g_repair_round = 0U;
+    if (Boot_SendPeerFrame(g_guard_node_id, BOOT_CMD_ROLLBACK_REQUEST,
+                           g_node_id, g_session_id, 0U) == 0U)
+    {
+        g_phase_started_ms = HAL_GetTick();
+    }
+}
+
+static void Boot_CoordinatorPhaseFailure(void)
+{
+    if ((g_recovery_phase == BOOT_RECOVERY_PHASE_NEW_REPAIR) ||
+        (g_recovery_phase == BOOT_RECOVERY_PHASE_NEW_VERIFY))
+    {
+        Boot_StartRollback();
+    }
+    else
+    {
+        Boot_FinalRecoveryFailure();
+    }
+}
+
+static void Boot_StartCommit(void)
+{
+    uint8_t self_bit = Boot_NodeBit(g_node_id);
+    g_recovery_phase = BOOT_RECOVERY_PHASE_COMMIT;
+    g_phase_started_ms = HAL_GetTick();
+    g_commit_expected_bitmap = g_primary_members_bitmap;
+    if ((g_guard_active != 0U) && (g_guard_node_id >= 1U) && (g_guard_node_id <= BOOT_MAX_NODE_NUM))
+        g_commit_expected_bitmap |= Boot_NodeBit(g_guard_node_id);
+    g_commit_ack_bitmap = 0U;
+    g_commit_tx_remaining = 0U;
+    g_commit_execute_received = 0U;
+    if ((g_commit_expected_bitmap & self_bit) != 0U)
+    {
+        if (Boot_ArmCommitLocal() == 0U) { Boot_FinalRecoveryFailure(); return; }
+        g_commit_ack_bitmap |= self_bit;
+    }
+    (void)Boot_SendPeerFrame(BOOT_BROADCAST_ID, BOOT_CMD_COMMIT_PREPARE,
+                             g_node_id, g_session_id, g_commit_expected_bitmap);
+}
+
+static void Boot_StartGuardUpdate(void)
+{
+    if ((g_guard_active == 0U) || (g_guard_node_id == 0U))
+    {
+        Boot_StartCommit();
+        return;
+    }
+    g_recovery_phase = BOOT_RECOVERY_PHASE_GUARD_UPDATE;
+    g_phase_started_ms = HAL_GetTick();
+    g_repair_round = 0U;
+    g_coord_wait_provider = 0U;
+    g_recovery_members_bitmap = Boot_NodeBit(g_guard_node_id);
+    (void)Boot_SendPeerFrame(g_guard_node_id, BOOT_CMD_GUARD_UPDATE_BEGIN,
+                             g_node_id, g_session_id, 0U);
+}
+
+static void Boot_StartVerifyContext(uint8_t context)
+{
+    uint8_t target = BOOT_BROADCAST_ID;
+    uint8_t self_bit = Boot_NodeBit(g_node_id);
+    g_verify_context = context;
+    g_verify_response_bitmap = 0U;
+    g_verify_ok_bitmap &= (uint8_t)~g_recovery_members_bitmap;
+    g_phase_started_ms = HAL_GetTick();
+    if (context == (uint8_t)BOOT_RECOVERY_PHASE_NEW_VERIFY)
+        g_recovery_phase = BOOT_RECOVERY_PHASE_NEW_VERIFY;
+    else if (context == (uint8_t)BOOT_RECOVERY_PHASE_GUARD_UPDATE)
+        target = g_guard_node_id;
+    else if (context == (uint8_t)BOOT_RECOVERY_PHASE_ROLLBACK_VERIFY)
+        g_recovery_phase = BOOT_RECOVERY_PHASE_ROLLBACK_VERIFY;
+
+    if ((g_recovery_members_bitmap & self_bit) != 0U)
+    {
+        g_verify_response_bitmap |= self_bit;
+        if (Boot_VerifyLocalForContext(context) != 0U) g_verify_ok_bitmap |= self_bit;
+        else { Boot_CoordinatorPhaseFailure(); return; }
+    }
+    (void)Boot_SendPeerFrame(target, BOOT_CMD_VERIFY_REQUEST, g_node_id, g_session_id, context);
+}
+
+static void Boot_ProcessPeerControl(const uint8_t *data, uint8_t len)
+{
+    Boot_ControlFrame_t frame;
+    uint16_t session;
+    uint16_t value;
+    uint8_t source;
+    uint8_t source_index;
+    uint8_t source_bit;
+
+    if ((data == NULL) || (len != BOOT_CONTROL_SIZE)) return;
+    if (Boot_CRC8(data, 7U) != data[7]) return;
+    memcpy(&frame, data, sizeof(frame));
+    if ((frame.target != g_node_id) && (frame.target != BOOT_BROADCAST_ID)) return;
+
+    session = Boot_ReadU16LE(&frame.param[0]);
+    value = Boot_ReadU16LE(&frame.param[2]);
+    source = frame.seq;
+    if ((g_session_active == 0U) || (session != g_session_id)) return;
+    if ((source < 1U) || (source > BOOT_MAX_NODE_NUM)) return;
+
+    source_index = (uint8_t)(source - 1U);
+    source_bit = Boot_NodeBit(source);
+
+    switch ((Boot_Command_t)frame.cmd)
+    {    case BOOT_CMD_MISSING_COUNT:
+        g_peer_active_bitmap |= source_bit;
+        if ((g_is_coordinator != 0U) && (g_coord_terminal == 0U) &&
+            (g_recovery_phase == BOOT_RECOVERY_PHASE_NEW_REPAIR))
+        {
+            g_recovery_members_bitmap |= source_bit;
+            g_primary_members_bitmap |= source_bit;
+        }
+        memset(g_peer_missing_bitmap[source_index], 0, sizeof(g_peer_missing_bitmap[source_index]));
+        g_peer_missing_expected[source_index] = value;
+        g_peer_missing_received[source_index] = 0U;
+        g_peer_report_complete_bitmap &= (uint8_t)~source_bit;
+        if (value == 0U) g_peer_report_complete_bitmap |= source_bit;
+        break;
+
+    case BOOT_CMD_MISSING_ITEM:
+        if (value >= g_total_packets) break;
+        if (Boot_PeerMissingGet(source, value) == 0U)
+        {
+            Boot_PeerMissingSet(source, value);
+            g_peer_missing_received[source_index]++;
+        }
+        if ((g_peer_missing_expected[source_index] != 0U) &&
+            (g_peer_missing_received[source_index] >= g_peer_missing_expected[source_index]))
+            g_peer_report_complete_bitmap |= source_bit;
+        break;
+
+    case BOOT_CMD_COORDINATOR_CLAIM:
+        if ((g_election_pending != 0U) && (g_node_id < source)) break;
+        if ((g_coordinator_id == 0U) || (source < g_coordinator_id))
+        {
+            g_coordinator_id = source;
+            g_is_coordinator = (source == g_node_id) ? 1U : 0U;
+            g_primary_members_bitmap = (uint8_t)(value & 0x00FFU);
+            g_recovery_members_bitmap = g_primary_members_bitmap;
+            g_election_pending = 0U;
+            if (g_is_coordinator != 0U) g_coord_scan_seq = 0U;
+        }
+        break;
+
+    case BOOT_CMD_PROVIDER_ASSIGN:
+        if ((frame.target != g_node_id) || (source != g_coordinator_id) ||
+            (g_provider_active != 0U) || (Boot_ProviderPacketAvailable(value, NULL) == 0U)) break;
+        g_provider_target = BOOT_BROADCAST_ID;
+        g_provider_next_seq = value;
+        g_provider_remaining = 1U;
+        g_provider_peer_seq = value;
+        g_provider_peer_mode = 1U;
+        g_provider_active = 1U;
+        g_provider_done_pending = 0U;
+        break;
+
+    case BOOT_CMD_FULL_STREAM:
+        if ((frame.target != g_node_id) || (source != g_coordinator_id) || (g_provider_active != 0U)) break;
+        {
+            uint32_t source_size = 0U;
+            uint32_t packets;
+            uint8_t data_target = (uint8_t)(value & 0x00FFU);
+            if (!(((data_target >= 1U) && (data_target <= BOOT_MAX_NODE_NUM)) ||
+                  (data_target == BOOT_BROADCAST_ID))) break;
+            if (Boot_ProviderPacketAvailable(0U, &source_size) == 0U) break;
+            packets = (source_size + BOOT_DATA_PAYLOAD_SIZE - 1UL) / BOOT_DATA_PAYLOAD_SIZE;
+            if ((packets == 0U) || (packets > 65535UL)) break;
+            g_provider_target = data_target;
+            g_provider_next_seq = 0U;
+            g_provider_remaining = (uint16_t)packets;
+            g_provider_peer_seq = 0xFFFFU;
+            g_provider_peer_mode = 1U;
+            g_provider_active = 1U;
+            g_provider_done_pending = 0U;
+        }
+        break;
+
+    case BOOT_CMD_PROVIDER_DONE:
+        if ((g_is_coordinator != 0U) && (frame.target == g_node_id) &&
+            (source == g_coord_provider_id) && (value == g_coord_current_seq))
+        {
+            Boot_CoordinatorProviderDone(value);
+        }
+        break;
+
+    case BOOT_CMD_REPAIR_ROUND_END:
+        if (source != g_coordinator_id) break;
+        g_repair_round = (uint8_t)(value & 0x00FFU);
+        if (g_recovery_phase == BOOT_RECOVERY_PHASE_GUARD_UPDATE)
+            g_recovery_phase = BOOT_RECOVERY_PHASE_GUARD_REPAIR;
+        else if (g_recovery_phase == BOOT_RECOVERY_PHASE_ROLLBACK_PREP)
+            g_recovery_phase = BOOT_RECOVERY_PHASE_ROLLBACK_REPAIR;
+        g_status = BOOT_STATUS_REPAIR;
+        if ((g_is_coordinator == 0U) &&
+            ((g_recovery_members_bitmap & Boot_NodeBit(g_node_id)) != 0U))
+        {
+            Boot_StartPeerMissingReport();
+        }
+        break;
+
+    case BOOT_CMD_VERIFY_REQUEST:
+        if (source != g_coordinator_id) break;
+        {
+            uint8_t context = (uint8_t)(value & 0x00FFU);
+            uint8_t ok = 0U;
+            uint8_t self_bit = Boot_NodeBit(g_node_id);
+            if ((g_recovery_members_bitmap & self_bit) == 0U) break;
+            g_verify_context = context;
+            if (context == (uint8_t)BOOT_RECOVERY_PHASE_NEW_VERIFY)
+                g_recovery_phase = BOOT_RECOVERY_PHASE_NEW_VERIFY;
+            else if (context == (uint8_t)BOOT_RECOVERY_PHASE_ROLLBACK_VERIFY)
+                g_recovery_phase = BOOT_RECOVERY_PHASE_ROLLBACK_VERIFY;
+            ok = Boot_VerifyLocalForContext(context);
+            if (ok == 0U) g_status = BOOT_STATUS_ERROR;
+            (void)Boot_SendPeerFrame(g_coordinator_id, BOOT_CMD_VERIFY_RESULT,
+                                     g_node_id, g_session_id,
+                                     (uint16_t)(((uint16_t)context << 8U) | (ok ? 1U : 0U)));
+        }
+        break;
+
+    case BOOT_CMD_VERIFY_RESULT:        if ((g_is_coordinator != 0U) && (frame.target == g_node_id))
+        {
+            uint8_t context = (uint8_t)((value >> 8U) & 0xFFU);
+            uint8_t ok = (uint8_t)(value & 0xFFU);
+            if ((context != g_verify_context) ||
+                ((g_recovery_members_bitmap & source_bit) == 0U)) break;
+            g_verify_response_bitmap |= source_bit;
+            if (ok != 0U) g_verify_ok_bitmap |= source_bit;
+            else Boot_CoordinatorPhaseFailure();
+        }
+        break;
+
+    case BOOT_CMD_GUARD_UPDATE_BEGIN:
+        if ((source != g_coordinator_id) || (g_node_id != g_guard_node_id) ||
+            (g_is_guard == 0U) || (g_session_crc_valid == 0U) ||
+            (g_session_image_size == 0U)) break;
+        g_recovery_phase = BOOT_RECOVERY_PHASE_GUARD_UPDATE;
+        g_recovery_members_bitmap = Boot_NodeBit(g_node_id);
+        g_is_guard = 0U;
+        value = Boot_PrepareAppWriteInternal(g_session_image_size) ? 1U : 0U;
+        (void)Boot_SendPeerFrame(g_coordinator_id, BOOT_CMD_GUARD_UPDATE_READY,
+                                 g_node_id, g_session_id, value);
+        break;
+
+    case BOOT_CMD_GUARD_UPDATE_READY:
+        if ((g_is_coordinator != 0U) && (frame.target == g_node_id) &&
+            (source == g_guard_node_id) &&
+            (g_recovery_phase == BOOT_RECOVERY_PHASE_GUARD_UPDATE))
+        {
+            uint8_t provider;
+            if (value == 0U) { Boot_CoordinatorPhaseFailure(); break; }
+            provider = Boot_SelectVerifiedProvider();
+            if (provider == 0U) { Boot_CoordinatorPhaseFailure(); break; }
+            g_coord_provider_id = provider;
+            g_coord_current_seq = 0xFFFFU;
+            g_coord_wait_provider = 1U;
+            g_provider_wait_started_ms = HAL_GetTick();
+            g_phase_started_ms = HAL_GetTick();
+            if (provider == g_node_id)
+            {
+                uint32_t source_size = 0U;
+                if (Boot_ProviderPacketAvailable(0U, &source_size) == 0U)
+                {
+                    Boot_CoordinatorPhaseFailure();
+                    break;
+                }
+                g_provider_target = g_guard_node_id;
+                g_provider_next_seq = 0U;
+                g_provider_remaining = (uint16_t)((source_size + BOOT_DATA_PAYLOAD_SIZE - 1UL) /
+                                                   BOOT_DATA_PAYLOAD_SIZE);
+                g_provider_peer_seq = 0xFFFFU;
+                g_provider_peer_mode = 1U;
+                g_provider_active = 1U;
+                g_provider_done_pending = 0U;
+            }
+            else if (Boot_SendPeerFrame(provider, BOOT_CMD_FULL_STREAM, g_node_id,
+                                        g_session_id, g_guard_node_id) == 0U)
+            {
+                g_coord_wait_provider = 0U;
+            }
+        }
+        break;
+
+    case BOOT_CMD_ROLLBACK_REQUEST:
+        if ((g_node_id != g_guard_node_id) || (g_is_guard == 0U) ||
+            (Boot_RuntimeValidatePersistedApp(&g_config) == 0U)) break;
+        g_rollback_size = g_config.app_size;
+        g_rollback_crc32 = g_config.app_crc32;
+        g_guard_meta_tx_stage = 1U;
+        break;
+
+    case BOOT_CMD_ROLLBACK_SIZE_LO:        if (source == g_guard_node_id)
+        {
+            g_rollback_size = (g_rollback_size & 0xFFFF0000UL) | (uint32_t)value;
+            g_rollback_meta_mask |= 0x01U;
+        }
+        break;
+
+    case BOOT_CMD_ROLLBACK_SIZE_HI:
+        if (source == g_guard_node_id)
+        {
+            g_rollback_size = (g_rollback_size & 0x0000FFFFUL) | ((uint32_t)value << 16U);
+            g_rollback_meta_mask |= 0x02U;
+        }
+        break;
+
+    case BOOT_CMD_ROLLBACK_CRC_LO:
+        if (source == g_guard_node_id)
+        {
+            g_rollback_crc32 = (g_rollback_crc32 & 0xFFFF0000UL) | (uint32_t)value;
+            g_rollback_meta_mask |= 0x04U;
+        }
+        break;
+
+    case BOOT_CMD_ROLLBACK_CRC_HI:
+        if (source == g_guard_node_id)
+        {
+            g_rollback_crc32 = (g_rollback_crc32 & 0x0000FFFFUL) | ((uint32_t)value << 16U);
+            g_rollback_meta_mask |= 0x08U;
+        }
+        break;
+
+    case BOOT_CMD_ROLLBACK_BEGIN:
+        if ((source != g_coordinator_id) ||
+            ((g_primary_members_bitmap & Boot_NodeBit(g_node_id)) == 0U) ||
+            (g_rollback_meta_mask != 0x0FU)) break;
+        g_recovery_phase = BOOT_RECOVERY_PHASE_ROLLBACK_PREP;
+        value = Boot_PrepareAppWriteInternal(g_rollback_size) ? 1U : 0U;
+        (void)Boot_SendPeerFrame(g_coordinator_id, BOOT_CMD_ROLLBACK_PREPARED,
+                                 g_node_id, g_session_id, value);
+        break;
+
+    case BOOT_CMD_ROLLBACK_PREPARED:        if ((g_is_coordinator != 0U) && (frame.target == g_node_id) &&
+            ((g_primary_members_bitmap & source_bit) != 0U) &&
+            (g_recovery_phase == BOOT_RECOVERY_PHASE_ROLLBACK_PREP))
+        {
+            if (value == 0U) { Boot_FinalRecoveryFailure(); break; }
+            g_rollback_prepared_bitmap |= source_bit;
+        }
+        break;
+
+    case BOOT_CMD_COMMIT_PREPARE:
+        if (source != g_coordinator_id) break;
+        g_recovery_phase = BOOT_RECOVERY_PHASE_COMMIT;
+        g_commit_expected_bitmap = (uint8_t)(value & 0x00FFU);
+        if ((g_commit_expected_bitmap & Boot_NodeBit(g_node_id)) == 0U) break;
+        value = Boot_ArmCommitLocal() ? 1U : 0U;
+        (void)Boot_SendPeerFrame(g_coordinator_id, BOOT_CMD_COMMIT_ACK,
+                                 g_node_id, g_session_id, value);
+        break;
+
+    case BOOT_CMD_COMMIT_ACK:
+        if ((g_is_coordinator != 0U) && (frame.target == g_node_id) &&
+            (g_recovery_phase == BOOT_RECOVERY_PHASE_COMMIT) &&
+            ((g_commit_expected_bitmap & source_bit) != 0U))
+        {
+            if (value == 0U) { Boot_FinalRecoveryFailure(); break; }
+            g_commit_ack_bitmap |= source_bit;
+        }
+        break;
+
+    case BOOT_CMD_COMMIT_EXECUTE:
+        if ((source != g_coordinator_id) ||
+            ((uint8_t)(value & 0x00FFU) != g_commit_expected_bitmap) ||
+            ((g_commit_expected_bitmap & Boot_NodeBit(g_node_id)) == 0U)) break;
+        if (g_commit_execute_received == 0U)
+        {
+            if (Boot_ExecuteCommitLocal() == 0U)
+            {
+                g_status = BOOT_STATUS_ERROR;
+                g_last_error = BOOT_ERR_COMMIT;
+            }
+        }
+        break;
+
+    case BOOT_CMD_RECOVERY_READY:        if (source != g_coordinator_id) break;
+        g_repair_round = (uint8_t)(value & 0x00FFU);
+        if (Boot_MissingCount() == 0U) g_status = BOOT_STATUS_VERIFY;
+        g_coord_terminal = 1U;
+        break;
+
+    case BOOT_CMD_RECOVERY_FAILED:
+        if (source != g_coordinator_id) break;
+        g_repair_round = (uint8_t)(value & 0x00FFU);
+        g_recovery_phase = BOOT_RECOVERY_PHASE_FAILED;
+        g_status = BOOT_STATUS_ERROR;
+        g_last_error = BOOT_ERR_RECOVERY_FAILED;
+        g_coord_terminal = 1U;
+        break;
+
+    default:
+        break;
+    }
+}
+
 static void Boot_ProcessData(const uint8_t *data, uint8_t len)
 {
     uint8_t target;
@@ -1637,6 +2503,17 @@ static void Boot_ProcessData(const uint8_t *data, uint8_t len)
 
     if (data[1] != BOOT_DATA_CMD_WRITE)
     {
+        return;
+    }
+
+    if (Boot_ReadU16LE(&data[4]) != ((g_session_active != 0U) ? g_session_id : 0U))
+    {
+        g_last_error = BOOT_ERR_SESSION;
+        return;
+    }
+    if ((data[6] != 0U) || (data[7] != 0U))
+    {
+        g_last_error = BOOT_ERR_BAD_STATE;
         return;
     }
 
@@ -1811,47 +2688,62 @@ static void Boot_TaskProvider(void)
 
     if (g_provider_done_pending != 0U)
     {
-        if (0U)
-        {
-            return;
-        }
+        /* Boot_SendData() means accepted/staged, not necessarily physically sent.
+         * Drain native FD TX FIFO or Classic 0x100..0x107 fragments before DONE,
+         * otherwise the coordinator may start the next Missing scan too early. */
+        Boot_FlushTx(20U);
 
-        data[0] = g_provider_target;
-        if (Boot_SendResponse(BOOT_CMD_PROVIDER_GRANT,
-                                 BOOT_STATUS_READY,
-                                 data) != 0U)
+        if (g_provider_peer_mode != 0U)
         {
-            g_provider_done_pending = 0U;
+            if (g_coordinator_id == g_node_id)
+            {
+                Boot_CoordinatorProviderDone(g_provider_peer_seq);
+                g_provider_done_pending = 0U;
+                g_provider_peer_mode = 0U;
+            }
+            else if (Boot_SendPeerFrame(g_coordinator_id, BOOT_CMD_PROVIDER_DONE, g_node_id, g_session_id, g_provider_peer_seq) != 0U)
+            {
+                g_provider_done_pending = 0U;
+                g_provider_peer_mode = 0U;
+            }
+        }
+        else
+        {
+            data[0] = g_provider_target;
+            if (Boot_SendResponse(BOOT_CMD_PROVIDER_GRANT, BOOT_STATUS_READY, data) != 0U) g_provider_done_pending = 0U;
         }
         return;
     }
 
-    if ((g_provider_active == 0U))
-    {
-        return;
-    }
-
-    if (Boot_BuildProviderFrame(g_provider_next_seq,
-                                   g_provider_target,
-                                   fd_frame) == 0U)
+    if (g_provider_active == 0U) return;
+    if (Boot_BuildProviderFrame(g_provider_next_seq, g_provider_target, fd_frame) == 0U)
     {
         g_provider_active = 0U;
         Boot_SetError(BOOT_ERR_PROVIDER_SOURCE, 0U);
-        data[0] = (uint8_t)BOOT_ERR_PROVIDER_SOURCE;
-        (void)Boot_SendResponse(BOOT_CMD_PROVIDER_GRANT,
-                                   BOOT_STATUS_ERROR,
-                                   data);
+        if (g_provider_peer_mode != 0U)
+        {
+            if (g_coordinator_id == g_node_id)
+            {
+                g_coord_wait_provider = 0U;
+                Boot_CoordinatorPhaseFailure();
+            }
+            else
+            {
+                (void)Boot_SendPeerFrame(g_coordinator_id, BOOT_CMD_PROVIDER_DONE, g_node_id, g_session_id, g_provider_peer_seq);
+            }
+            g_provider_peer_mode = 0U;
+        }
+        else
+        {
+            data[0] = (uint8_t)BOOT_ERR_PROVIDER_SOURCE;
+            (void)Boot_SendResponse(BOOT_CMD_PROVIDER_GRANT, BOOT_STATUS_ERROR, data);
+        }
         return;
     }
 
-    if (Boot_SendData(fd_frame, BOOT_DATA_SIZE) == 0U)
-    {
-        return;
-    }
-
+    if (Boot_SendData(fd_frame, BOOT_DATA_SIZE) == 0U) return;
     g_provider_next_seq++;
     g_provider_remaining--;
-
     if (g_provider_remaining == 0U)
     {
         g_provider_active = 0U;
@@ -1859,10 +2751,452 @@ static void Boot_TaskProvider(void)
     }
 }
 
+static void Boot_TaskPeerMissingReport(void)
+{
+    uint16_t missing;
+    if (g_peer_report_tx_active == 0U) return;
+    missing = Boot_MissingCount();
+    if (g_peer_report_tx_count_sent == 0U)
+    {
+        if (Boot_SendPeerFrame(BOOT_BROADCAST_ID, BOOT_CMD_MISSING_COUNT, g_node_id, g_session_id, missing) != 0U)
+        {
+            g_peer_report_tx_count_sent = 1U;
+            if (missing == 0U) g_peer_report_tx_active = 0U;
+        }
+        return;
+    }
+    if ((int32_t)(HAL_GetTick() - g_peer_report_items_after_ms) < 0) return;
+
+    while (g_peer_report_tx_scan_seq < g_total_packets)
+    {
+        uint16_t seq = g_peer_report_tx_scan_seq++;
+        if (Boot_BitmapGet(seq) == 0U)
+        {
+            if (Boot_SendPeerFrame(BOOT_BROADCAST_ID, BOOT_CMD_MISSING_ITEM, g_node_id, g_session_id, seq) != 0U)
+            {
+                g_peer_report_tx_item_count++;
+                if (g_peer_report_tx_item_count >= missing) g_peer_report_tx_active = 0U;
+            }
+            else g_peer_report_tx_scan_seq--;
+            return;
+        }
+    }
+    g_peer_report_tx_active = 0U;
+}
+
+static void Boot_TaskElection(void)
+{
+    uint32_t wait_ms;
+    uint16_t claim_info;
+
+    if (g_election_pending == 0U) return;
+    if (g_coordinator_id != 0U)
+    {
+        g_election_pending = 0U;
+        return;
+    }
+
+    /* Deterministic claim slots: Node1 gets the first slot, then Node2, etc.
+     * If a lower-ID node reported during discovery but dies before claiming,
+     * the next live ID automatically claims in its later slot. */
+    wait_ms = BOOT_COORD_ELECTION_DELAY_MS +
+              ((uint32_t)(g_node_id - 1U) * BOOT_COORD_CLAIM_SLOT_MS);
+    if ((HAL_GetTick() - g_election_started_ms) < wait_ms) return;
+
+    claim_info = (uint16_t)g_peer_active_bitmap |
+                 ((uint16_t)g_guard_node_id << 8U);
+    if (Boot_SendPeerFrame(BOOT_BROADCAST_ID, BOOT_CMD_COORDINATOR_CLAIM,
+                           g_node_id, g_session_id, claim_info) != 0U)
+    {
+        g_coordinator_id = g_node_id;
+        g_is_coordinator = 1U;
+        g_primary_members_bitmap = g_peer_active_bitmap;
+        g_recovery_members_bitmap = g_primary_members_bitmap;
+        g_coord_scan_seq = 0U;
+        g_phase_started_ms = HAL_GetTick();
+        g_election_pending = 0U;
+    }
+}
+
+static void Boot_RequestRepairReports(uint8_t target)
+{
+    Boot_ClearRemoteReportsForNextRound();
+    g_provider_failed_bitmap = 0U;
+    g_phase_started_ms = HAL_GetTick();
+    (void)Boot_SendPeerFrame(target, BOOT_CMD_REPAIR_ROUND_END,
+                             g_node_id, g_session_id, g_repair_round);
+}
+
+static void Boot_CoordinatorProviderDone(uint16_t value)
+{
+    g_coord_wait_provider = 0U;
+    g_coord_provider_id = 0U;
+    g_provider_wait_started_ms = 0U;
+    if (value != 0xFFFFU)
+    {
+        g_coord_scan_seq = (uint16_t)(value + 1U);
+        return;
+    }
+
+    g_coord_scan_seq = 0U;
+    g_coord_sweep_had_missing = 0U;
+    g_repair_round = 0U;
+
+    if (g_recovery_phase == BOOT_RECOVERY_PHASE_GUARD_UPDATE)
+    {
+        g_recovery_phase = BOOT_RECOVERY_PHASE_GUARD_REPAIR;
+        g_recovery_members_bitmap = Boot_NodeBit(g_guard_node_id);
+        Boot_RequestRepairReports(g_guard_node_id);
+    }
+    else if (g_recovery_phase == BOOT_RECOVERY_PHASE_ROLLBACK_PREP)
+    {
+        g_recovery_phase = BOOT_RECOVERY_PHASE_ROLLBACK_REPAIR;
+        g_recovery_members_bitmap = g_primary_members_bitmap;
+        Boot_RequestRepairReports(BOOT_BROADCAST_ID);
+    }
+    else
+    {
+        Boot_CoordinatorPhaseFailure();
+    }
+}
+
+static void Boot_TaskCoordinator(void)
+{
+    uint8_t provider;
+    uint8_t report_target;
+
+    if ((g_is_coordinator == 0U) || (g_coord_terminal != 0U)) return;
+    if (!((g_recovery_phase == BOOT_RECOVERY_PHASE_NEW_REPAIR) ||
+          (g_recovery_phase == BOOT_RECOVERY_PHASE_GUARD_REPAIR) ||
+          (g_recovery_phase == BOOT_RECOVERY_PHASE_ROLLBACK_REPAIR))) return;
+    if (Boot_AllPeerReportsComplete() == 0U)
+    {
+        if ((HAL_GetTick() - g_phase_started_ms) >= BOOT_PEER_PHASE_TIMEOUT_MS)
+            Boot_CoordinatorPhaseFailure();
+        return;
+    }
+    if (g_coord_wait_provider != 0U)
+    {
+        if ((HAL_GetTick() - g_provider_wait_started_ms) >= BOOT_PROVIDER_TIMEOUT_MS)
+        {
+            if ((g_coord_provider_id >= 1U) && (g_coord_provider_id <= BOOT_MAX_NODE_NUM))
+                g_provider_failed_bitmap |= Boot_NodeBit(g_coord_provider_id);
+            if (g_coord_provider_id == g_node_id)
+            {
+                g_provider_active = 0U;
+                g_provider_done_pending = 0U;
+                g_provider_peer_mode = 0U;
+            }
+            g_coord_wait_provider = 0U;
+            g_coord_provider_id = 0U;
+        }
+        return;
+    }
+
+    while (g_coord_scan_seq < g_total_packets)
+    {
+        uint16_t seq = g_coord_scan_seq;
+        if (Boot_AnyMemberMissing(seq) == 0U)
+        {
+            g_coord_scan_seq++;
+            continue;
+        }
+
+        if (g_repair_round >= BOOT_MAX_REPAIR_ROUNDS)
+        {
+            Boot_CoordinatorPhaseFailure();
+            return;
+        }
+
+        provider = Boot_SelectProvider(seq);
+        if (provider == 0U)
+        {
+            g_repair_round++;
+            if (g_repair_round >= BOOT_MAX_REPAIR_ROUNDS)
+            {
+                Boot_CoordinatorPhaseFailure();
+                return;
+            }
+            g_coord_scan_seq = 0U;
+            g_coord_sweep_had_missing = 0U;
+            report_target = (g_recovery_phase == BOOT_RECOVERY_PHASE_GUARD_REPAIR) ?
+                            g_guard_node_id : BOOT_BROADCAST_ID;
+            Boot_RequestRepairReports(report_target);
+            return;
+        }
+
+        g_coord_current_seq = seq;
+        g_coord_provider_id = provider;
+        g_coord_wait_provider = 1U;
+        g_provider_wait_started_ms = HAL_GetTick();
+        g_coord_sweep_had_missing = 1U;
+
+        if (provider == g_node_id)
+        {
+            g_provider_target = BOOT_BROADCAST_ID;
+            g_provider_next_seq = seq;
+            g_provider_remaining = 1U;
+            g_provider_peer_seq = seq;
+            g_provider_peer_mode = 1U;
+            g_provider_active = 1U;
+            g_provider_done_pending = 0U;
+            return;
+        }
+
+        if (Boot_SendPeerFrame(provider, BOOT_CMD_PROVIDER_ASSIGN,
+                               g_node_id, g_session_id, seq) == 0U)
+        {
+            g_coord_wait_provider = 0U;
+        }
+        return;
+    }
+
+    if (g_coord_sweep_had_missing == 0U)
+    {
+        if (g_recovery_phase == BOOT_RECOVERY_PHASE_NEW_REPAIR)
+        {
+            if ((g_session_flags & BOOT_SESSION_FLAG_COORD_COMMIT) != 0U)
+            {
+                if (g_session_crc_valid == 0U) { Boot_CoordinatorPhaseFailure(); return; }
+                g_recovery_members_bitmap = g_primary_members_bitmap;
+                Boot_StartVerifyContext((uint8_t)BOOT_RECOVERY_PHASE_NEW_VERIFY);
+            }
+            else
+            {
+                g_coord_terminal = 1U;
+                g_status = BOOT_STATUS_VERIFY;
+                (void)Boot_SendPeerFrame(BOOT_BROADCAST_ID, BOOT_CMD_RECOVERY_READY,
+                                         g_node_id, g_session_id, g_repair_round);
+            }
+        }
+        else if (g_recovery_phase == BOOT_RECOVERY_PHASE_GUARD_REPAIR)
+        {
+            Boot_StartVerifyContext((uint8_t)BOOT_RECOVERY_PHASE_GUARD_UPDATE);
+        }
+        else
+        {
+            Boot_StartVerifyContext((uint8_t)BOOT_RECOVERY_PHASE_ROLLBACK_VERIFY);
+        }
+        return;
+    }
+
+    g_repair_round++;
+    g_coord_scan_seq = 0U;
+    g_coord_sweep_had_missing = 0U;
+    report_target = (g_recovery_phase == BOOT_RECOVERY_PHASE_GUARD_REPAIR) ?
+                    g_guard_node_id : BOOT_BROADCAST_ID;
+    Boot_RequestRepairReports(report_target);
+}
+
+static void Boot_TaskVerifyPhase(void)
+{
+    uint8_t expected;
+    if ((g_is_coordinator == 0U) || (g_verify_context == 0U) ||
+        (g_coord_terminal != 0U)) return;
+
+    expected = g_recovery_members_bitmap;
+    if ((g_verify_response_bitmap & expected) == expected)
+    {
+        uint8_t context = g_verify_context;
+        g_verify_context = 0U;
+        if ((g_verify_ok_bitmap & expected) != expected)
+        {
+            Boot_CoordinatorPhaseFailure();
+            return;
+        }
+
+        if (context == (uint8_t)BOOT_RECOVERY_PHASE_NEW_VERIFY)
+        {
+            Boot_StartGuardUpdate();
+        }
+        else
+        {
+            Boot_StartCommit();
+        }
+        return;
+    }
+
+    if ((HAL_GetTick() - g_phase_started_ms) >= BOOT_PEER_PHASE_TIMEOUT_MS)
+    {
+        Boot_CoordinatorPhaseFailure();
+    }
+}
+
+static void Boot_TaskGuardMetadata(void)
+{
+    uint8_t cmd = 0U;
+    uint16_t value = 0U;
+
+    if (g_guard_meta_tx_stage == 0U) return;
+    switch (g_guard_meta_tx_stage)
+    {
+    case 1U: cmd = BOOT_CMD_ROLLBACK_SIZE_LO; value = (uint16_t)(g_rollback_size & 0xFFFFU); break;
+    case 2U: cmd = BOOT_CMD_ROLLBACK_SIZE_HI; value = (uint16_t)(g_rollback_size >> 16U); break;
+    case 3U: cmd = BOOT_CMD_ROLLBACK_CRC_LO; value = (uint16_t)(g_rollback_crc32 & 0xFFFFU); break;
+    case 4U: cmd = BOOT_CMD_ROLLBACK_CRC_HI; value = (uint16_t)(g_rollback_crc32 >> 16U); break;
+    default: g_guard_meta_tx_stage = 0U; return;
+    }
+
+    if (Boot_SendPeerFrame(BOOT_BROADCAST_ID, cmd, g_node_id, g_session_id, value) != 0U)
+    {
+        g_guard_meta_tx_stage++;
+        if (g_guard_meta_tx_stage > 4U) g_guard_meta_tx_stage = 0U;
+    }
+}
+
+static void Boot_TaskRollbackState(void)
+{
+    uint8_t self_bit;
+    if (g_is_coordinator == 0U) return;
+
+    if (g_recovery_phase == BOOT_RECOVERY_PHASE_ROLLBACK_META)
+    {
+        if (g_rollback_meta_mask == 0x0FU)
+        {
+            if ((g_rollback_size == 0U) || (g_rollback_size > BOOT_APP_MAX_SIZE))
+            {
+                Boot_FinalRecoveryFailure();
+                return;
+            }
+            g_recovery_phase = BOOT_RECOVERY_PHASE_ROLLBACK_PREP;
+            g_phase_started_ms = HAL_GetTick();
+            g_recovery_members_bitmap = g_primary_members_bitmap;
+            g_rollback_prepared_bitmap = 0U;
+            self_bit = Boot_NodeBit(g_node_id);
+            if ((g_primary_members_bitmap & self_bit) != 0U)
+            {
+                if (Boot_PrepareAppWriteInternal(g_rollback_size) == 0U)
+                {
+                    Boot_FinalRecoveryFailure();
+                    return;
+                }
+                g_rollback_prepared_bitmap |= self_bit;
+            }
+            (void)Boot_SendPeerFrame(BOOT_BROADCAST_ID, BOOT_CMD_ROLLBACK_BEGIN,
+                                     g_node_id, g_session_id, 0U);
+        }
+        else if ((HAL_GetTick() - g_phase_started_ms) >= BOOT_PEER_PHASE_TIMEOUT_MS)
+        {
+            Boot_FinalRecoveryFailure();
+        }
+        return;
+    }
+    if (g_recovery_phase == BOOT_RECOVERY_PHASE_ROLLBACK_PREP)
+    {
+        if ((g_rollback_prepared_bitmap & g_primary_members_bitmap) == g_primary_members_bitmap)
+        {
+            if (g_coord_wait_provider == 0U)
+            {
+                g_coord_provider_id = g_guard_node_id;
+                g_coord_current_seq = 0xFFFFU;
+                if (Boot_SendPeerFrame(g_guard_node_id, BOOT_CMD_FULL_STREAM,
+                                       g_node_id, g_session_id, BOOT_BROADCAST_ID) != 0U)
+                {
+                    g_coord_wait_provider = 1U;
+                    g_provider_wait_started_ms = HAL_GetTick();
+                    g_phase_started_ms = HAL_GetTick();
+                }
+            }
+        }
+        else if ((HAL_GetTick() - g_phase_started_ms) >= BOOT_PEER_PHASE_TIMEOUT_MS)
+        {
+            Boot_FinalRecoveryFailure();
+        }
+    }
+}
+
+static void Boot_TaskProviderPhaseWatchdog(void)
+{
+    if (g_is_coordinator == 0U) return;
+    if (g_recovery_phase == BOOT_RECOVERY_PHASE_GUARD_UPDATE)
+    {
+        if ((g_coord_wait_provider == 0U) && (g_coord_provider_id == 0U))
+        {
+            if ((HAL_GetTick() - g_phase_started_ms) >= BOOT_PEER_PHASE_TIMEOUT_MS)
+                Boot_CoordinatorPhaseFailure();
+            return;
+        }
+        if ((g_coord_wait_provider == 0U) && (g_coord_provider_id != g_node_id))
+        {
+            if (Boot_SendPeerFrame(g_coord_provider_id, BOOT_CMD_FULL_STREAM, g_node_id,
+                                   g_session_id, g_guard_node_id) != 0U)
+            {
+                g_coord_wait_provider = 1U;
+                g_provider_wait_started_ms = HAL_GetTick();
+            }
+            else if ((HAL_GetTick() - g_phase_started_ms) >= BOOT_PEER_PHASE_TIMEOUT_MS)
+                Boot_CoordinatorPhaseFailure();
+            return;
+        }
+    }
+    if (g_coord_wait_provider == 0U) return;
+    if (!((g_recovery_phase == BOOT_RECOVERY_PHASE_GUARD_UPDATE) ||
+          (g_recovery_phase == BOOT_RECOVERY_PHASE_ROLLBACK_PREP))) return;
+    if ((HAL_GetTick() - g_provider_wait_started_ms) < BOOT_PROVIDER_TIMEOUT_MS) return;
+    if (g_coord_provider_id == g_node_id)
+    {
+        g_provider_active = 0U;
+        g_provider_done_pending = 0U;
+        g_provider_peer_mode = 0U;
+    }
+    g_coord_wait_provider = 0U;
+    g_coord_provider_id = 0U;
+    Boot_CoordinatorPhaseFailure();
+}
+
+static void Boot_TaskCommit(void)
+{
+    if (g_recovery_phase != BOOT_RECOVERY_PHASE_COMMIT) return;
+
+    if ((g_is_coordinator != 0U) && (g_commit_tx_remaining == 0U) &&
+        (g_commit_execute_received == 0U) &&
+        ((g_commit_ack_bitmap & g_commit_expected_bitmap) == g_commit_expected_bitmap))
+    {
+        g_commit_tx_remaining = BOOT_COMMIT_REPEAT_COUNT;
+    }
+
+    if ((g_is_coordinator != 0U) && (g_commit_tx_remaining != 0U))
+    {
+        if (Boot_SendPeerFrame(BOOT_BROADCAST_ID, BOOT_CMD_COMMIT_EXECUTE,
+                               g_node_id, g_session_id, g_commit_expected_bitmap) != 0U)
+        {
+            g_commit_tx_remaining--;
+            if (g_commit_execute_received == 0U && Boot_ExecuteCommitLocal() == 0U)
+            {
+                g_status = BOOT_STATUS_ERROR;
+                g_last_error = BOOT_ERR_COMMIT;
+                return;
+            }
+        }
+    }
+
+    if ((g_is_coordinator != 0U) && (g_commit_execute_received == 0U) &&
+        ((HAL_GetTick() - g_phase_started_ms) >= BOOT_PEER_PHASE_TIMEOUT_MS))
+    {
+        Boot_FinalRecoveryFailure();
+        return;
+    }
+
+    if ((g_commit_execute_received != 0U) &&
+        ((g_is_coordinator == 0U) || (g_commit_tx_remaining == 0U)) &&
+        ((int32_t)(HAL_GetTick() - g_commit_due_ms) >= 0))
+    {
+        Boot_FlushTx(20U);
+        Boot_RuntimeJumpToApp();
+    }
+}
+
 static void Boot_AsyncTask(void)
 {
-    /* Reports first, then READ streaming, then provider data. */
     Boot_TaskMissingReport();
+    Boot_TaskPeerMissingReport();
+    Boot_TaskGuardMetadata();
+    Boot_TaskElection();
+    Boot_TaskCoordinator();
+    Boot_TaskVerifyPhase();
+    Boot_TaskRollbackState();
+    Boot_TaskProviderPhaseWatchdog();
+    Boot_TaskCommit();
     Boot_TaskRead();
     Boot_TaskProvider();
 }
@@ -1934,7 +3268,8 @@ uint8_t Boot_Input(const Boot_Message_t *message)
     }
 
     if ((message->type != (uint8_t)BOOT_MESSAGE_CONTROL) &&
-        (message->type != (uint8_t)BOOT_MESSAGE_DATA))
+        (message->type != (uint8_t)BOOT_MESSAGE_DATA) &&
+        (message->type != (uint8_t)BOOT_MESSAGE_PEER_CONTROL))
     {
         return 0U;
     }
@@ -1987,6 +3322,11 @@ void Boot_Task(void)
         {
             Boot_ProcessData(message.data, (uint8_t)message.len);
         }
+        else if ((message.type == (uint8_t)BOOT_MESSAGE_PEER_CONTROL) &&
+                 (message.len == BOOT_CONTROL_SIZE))
+        {
+            Boot_ProcessPeerControl(message.data, (uint8_t)message.len);
+        }
     }
 
     Boot_AsyncTask();
@@ -1995,4 +3335,29 @@ void Boot_Task(void)
 uint32_t Boot_GetRxOverflowCount(void)
 {
     return g_rx_overflow;
+}
+
+uint16_t Boot_GetSessionId(void)
+{
+    return g_session_id;
+}
+
+uint8_t Boot_GetCoordinatorId(void)
+{
+    return g_coordinator_id;
+}
+
+uint8_t Boot_IsCoordinator(void)
+{
+    return g_is_coordinator;
+}
+
+uint8_t Boot_GetRepairRound(void)
+{
+    return g_repair_round;
+}
+
+uint8_t Boot_GetRecoveryPhase(void)
+{
+    return (uint8_t)g_recovery_phase;
 }

@@ -116,6 +116,7 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    BootPort_CAN_Task(&hfdcan1);
     Boot_Task();
     /* USER CODE END WHILE */
 

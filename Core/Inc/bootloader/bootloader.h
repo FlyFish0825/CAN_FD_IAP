@@ -57,7 +57,20 @@ extern "C" {
 #define BOOT_BITMAP_SIZE_BYTES        ((BOOT_MAX_PACKET_COUNT + 7UL) / 8UL)
 
 #define BOOT_VERSION_MAJOR            1U
-#define BOOT_VERSION_MINOR            0U
+#define BOOT_VERSION_MINOR            2U
+
+/* Session / autonomous recovery policy. Session 0 keeps legacy behavior. */
+#define BOOT_SESSION_FLAG_PEER_RECOVERY   0x01U
+#define BOOT_SESSION_FLAG_GUARD_ROLLBACK  0x02U
+#define BOOT_SESSION_FLAG_COORD_COMMIT    0x04U
+#define BOOT_COORD_ELECTION_DELAY_MS      200U
+#define BOOT_COORD_CLAIM_SLOT_MS          10U
+#define BOOT_PEER_PHASE_TIMEOUT_MS        5000U
+#define BOOT_PROVIDER_TIMEOUT_MS          10000U
+#define BOOT_PEER_MISSING_ITEM_DELAY_MS   20U
+#define BOOT_COMMIT_DELAY_MS              50U
+#define BOOT_COMMIT_REPEAT_COUNT          3U
+#define BOOT_MAX_REPAIR_ROUNDS            3U
 #define BOOT_VERSION_PATCH            0U
 #define BOOT_VERSION_BUILD            0U
 
@@ -83,8 +96,9 @@ extern "C" {
 /* -------------------- The ONLY link-layer exchange object --------------- */
 typedef enum
 {
-    BOOT_MESSAGE_CONTROL = 0U,  /* 8-byte command / response */
-    BOOT_MESSAGE_DATA    = 1U,  /* 64-byte firmware data packet */
+    BOOT_MESSAGE_CONTROL      = 0U, /* host request / node response, 8 bytes */
+    BOOT_MESSAGE_DATA         = 1U, /* 64-byte firmware data packet */
+    BOOT_MESSAGE_PEER_CONTROL = 2U, /* node-to-node coordination, 8 bytes */
 } Boot_MessageType_t;
 
 typedef struct
@@ -114,6 +128,8 @@ typedef enum
     BOOT_CMD_ENTER_BOOT       = 0x04,
     BOOT_CMD_SET_GUARD        = 0x05,
     BOOT_CMD_RELEASE_GUARD    = 0x06,
+    BOOT_CMD_SESSION_BEGIN    = 0x07,
+    BOOT_CMD_SESSION_CRC32    = 0x08,
 
     BOOT_CMD_ERASE            = 0x10,
     BOOT_CMD_WRITE            = 0x11,
@@ -124,6 +140,30 @@ typedef enum
     BOOT_CMD_MISSING_ITEM     = 0x16,
     BOOT_CMD_PROVIDER_GRANT   = 0x17,
     BOOT_CMD_ABORT            = 0x18,
+
+    /* Autonomous node-to-node recovery commands. */
+    BOOT_CMD_COORDINATOR_CLAIM = 0x19,
+    BOOT_CMD_PROVIDER_ASSIGN    = 0x1A,
+    BOOT_CMD_PROVIDER_DONE      = 0x1B,
+    BOOT_CMD_REPAIR_ROUND_END   = 0x1C,
+    BOOT_CMD_RECOVERY_READY     = 0x1D,
+    BOOT_CMD_RECOVERY_FAILED    = 0x1E,
+
+    BOOT_CMD_VERIFY_REQUEST      = 0x22,
+    BOOT_CMD_VERIFY_RESULT       = 0x23,
+    BOOT_CMD_GUARD_UPDATE_BEGIN  = 0x24,
+    BOOT_CMD_GUARD_UPDATE_READY  = 0x25,
+    BOOT_CMD_ROLLBACK_REQUEST    = 0x26,
+    BOOT_CMD_ROLLBACK_SIZE_LO    = 0x27,
+    BOOT_CMD_ROLLBACK_SIZE_HI    = 0x28,
+    BOOT_CMD_ROLLBACK_CRC_LO     = 0x29,
+    BOOT_CMD_ROLLBACK_CRC_HI     = 0x2A,
+    BOOT_CMD_ROLLBACK_BEGIN      = 0x2B,
+    BOOT_CMD_ROLLBACK_PREPARED   = 0x2C,
+    BOOT_CMD_FULL_STREAM         = 0x2D,
+    BOOT_CMD_COMMIT_PREPARE      = 0x2E,
+    BOOT_CMD_COMMIT_ACK          = 0x2F,
+    BOOT_CMD_COMMIT_EXECUTE      = 0x31,
 
     BOOT_CMD_JUMP_APP         = 0x20,
     BOOT_CMD_RESET            = 0x21,
@@ -162,7 +202,26 @@ typedef enum
     BOOT_ERR_PROTECTED_REGION = 0x0F,
     BOOT_ERR_ABORTED          = 0x10,
     BOOT_ERR_RX_OVERFLOW      = 0x11,
+    BOOT_ERR_SESSION          = 0x12,
+    BOOT_ERR_COORDINATOR      = 0x13,
+    BOOT_ERR_RECOVERY_FAILED  = 0x14,
+    BOOT_ERR_COMMIT           = 0x15,
 } Boot_Error_t;
+
+typedef enum
+{
+    BOOT_RECOVERY_PHASE_IDLE          = 0x00,
+    BOOT_RECOVERY_PHASE_NEW_REPAIR    = 0x01,
+    BOOT_RECOVERY_PHASE_NEW_VERIFY    = 0x02,
+    BOOT_RECOVERY_PHASE_GUARD_UPDATE  = 0x03,
+    BOOT_RECOVERY_PHASE_GUARD_REPAIR  = 0x04,
+    BOOT_RECOVERY_PHASE_ROLLBACK_META = 0x05,
+    BOOT_RECOVERY_PHASE_ROLLBACK_PREP = 0x06,
+    BOOT_RECOVERY_PHASE_ROLLBACK_REPAIR = 0x07,
+    BOOT_RECOVERY_PHASE_ROLLBACK_VERIFY = 0x08,
+    BOOT_RECOVERY_PHASE_COMMIT        = 0x09,
+    BOOT_RECOVERY_PHASE_FAILED        = 0x0A,
+} Boot_RecoveryPhase_t;
 
 /* Persistent PCB calibration + APP metadata. */
 typedef struct
@@ -230,6 +289,12 @@ uint8_t  Boot_GetStatus(void);
 uint8_t  Boot_GetLastError(void);
 uint8_t  Boot_GetProgress(void);
 uint32_t Boot_GetRxOverflowCount(void);
+
+uint16_t Boot_GetSessionId(void);
+uint8_t  Boot_GetCoordinatorId(void);
+uint8_t  Boot_IsCoordinator(void);
+uint8_t  Boot_GetRepairRound(void);
+uint8_t  Boot_GetRecoveryPhase(void);
 
 #ifdef __cplusplus
 }

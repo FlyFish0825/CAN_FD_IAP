@@ -120,28 +120,52 @@ typedef uint8_t (*Boot_SendCallback_t)(const Boot_Message_t *message,
 typedef void (*Boot_FlushCallback_t)(void *user, uint32_t timeout_ms);
 
 /* -------------------------- Commands ------------------------------------ */
+/*
+ * Command families (also used by README / COMMAND_TEST_GUIDE.md):
+ *
+ * A) Basic query / runtime control : 0x01..0x04, 0x18, 0x20, 0x21, 0x30
+ * B) Session / Guard              : 0x05..0x08
+ * C) Flash transfer / Legacy      : 0x10..0x14 (+ logical DATA cmd 0x01)
+ * D) Legacy Missing / Provider    : 0x15..0x17
+ * E) Autonomous election / Repair : 0x19..0x1E
+ * F) Verify / Guard / Rollback    : 0x22..0x2D
+ * G) Prepare / Commit             : 0x2E, 0x2F, 0x31
+ *
+ * Host CONTROL uses CAN ID 0x000 and gets RESPONSE on 0x500+NodeID.
+ * Autonomous peer commands use CAN ID 0x600+SourceNode and generally do NOT
+ * generate Host-style ACKs; their completion is observed through paired peer
+ * frames, DATA traffic, timeout handling, or the next recovery phase.
+ */
 typedef enum
 {
+    /* A. Basic query / runtime control. */
     BOOT_CMD_GET_VERSION      = 0x01,
     BOOT_CMD_GET_DEVICE_ID    = 0x02,
     BOOT_CMD_GET_INFO         = 0x03,
     BOOT_CMD_ENTER_BOOT       = 0x04,
+
+    /* B. Session / Guard transaction setup. */
     BOOT_CMD_SET_GUARD        = 0x05,
     BOOT_CMD_RELEASE_GUARD    = 0x06,
     BOOT_CMD_SESSION_BEGIN    = 0x07,
     BOOT_CMD_SESSION_CRC32    = 0x08,
 
+    /* C. Flash transfer / Legacy verification. */
     BOOT_CMD_ERASE            = 0x10,
     BOOT_CMD_WRITE            = 0x11,
     BOOT_CMD_READ             = 0x12,
     BOOT_CMD_VERIFY           = 0x13,
     BOOT_CMD_WRITE_END        = 0x14,
+
+    /* D. Legacy Missing report / Host-directed Provider. */
     BOOT_CMD_MISSING_COUNT    = 0x15,
     BOOT_CMD_MISSING_ITEM     = 0x16,
     BOOT_CMD_PROVIDER_GRANT   = 0x17,
+
+    /* A. Runtime control continuation. */
     BOOT_CMD_ABORT            = 0x18,
 
-    /* Autonomous node-to-node recovery commands. */
+    /* E. Autonomous node-to-node election / Provider / Repair. */
     BOOT_CMD_COORDINATOR_CLAIM = 0x19,
     BOOT_CMD_PROVIDER_ASSIGN    = 0x1A,
     BOOT_CMD_PROVIDER_DONE      = 0x1B,
@@ -149,6 +173,7 @@ typedef enum
     BOOT_CMD_RECOVERY_READY     = 0x1D,
     BOOT_CMD_RECOVERY_FAILED    = 0x1E,
 
+    /* F. Distributed verify / Guard update / Rollback. */
     BOOT_CMD_VERIFY_REQUEST      = 0x22,
     BOOT_CMD_VERIFY_RESULT       = 0x23,
     BOOT_CMD_GUARD_UPDATE_BEGIN  = 0x24,
@@ -161,10 +186,13 @@ typedef enum
     BOOT_CMD_ROLLBACK_BEGIN      = 0x2B,
     BOOT_CMD_ROLLBACK_PREPARED   = 0x2C,
     BOOT_CMD_FULL_STREAM         = 0x2D,
+
+    /* G. Prepare / Commit. */
     BOOT_CMD_COMMIT_PREPARE      = 0x2E,
     BOOT_CMD_COMMIT_ACK          = 0x2F,
     BOOT_CMD_COMMIT_EXECUTE      = 0x31,
 
+    /* A. Runtime control continuation. */
     BOOT_CMD_JUMP_APP         = 0x20,
     BOOT_CMD_RESET            = 0x21,
     BOOT_CMD_GET_STATUS       = 0x30,

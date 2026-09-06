@@ -706,6 +706,26 @@ static uint8_t Boot_RuntimeValidatePersistedApp(Boot_Config_t *cfg_out)
     return 1U;
 }
 
+/*
+ * Transfer control from Bootloader to the application image.
+ *
+ * Important: this is NOT equivalent to calling the APP reset handler directly.
+ * The Bootloader may leave PLL, peripheral clocks, SysTick and NVIC state very
+ * different from reset defaults.  STM32G4 HAL refuses to reconfigure an active
+ * PLL when it is still SYSCLK and the requested PLL parameters differ.  This was
+ * observed on hardware with a 170 MHz Bootloader and a 168 MHz APP.
+ *
+ * Therefore the hand-off order is intentionally:
+ *   1) HAL_DeInit()      - reset peripheral blocks / MSP low-level state;
+ *   2) HAL_RCC_DeInit()  - switch SYSCLK back to HSI and disable HSE/PLL;
+ *   3) disable/clear SysTick and all NVIC pending/enabled IRQs;
+ *   4) set APP VTOR, CONTROL and MSP;
+ *   5) branch to the APP Reset_Handler.
+ *
+ * HAL_DeInit/HAL_RCC_DeInit are called BEFORE __disable_irq(), because their
+ * timeout paths use the HAL tick.  After RCC is reset-like, interrupts are then
+ * disabled and cleaned before MSP is changed.
+ */
 static void Boot_RuntimeJumpToApp(void)
 {
     typedef void (*AppEntry_t)(void);
@@ -1316,6 +1336,19 @@ static uint8_t Boot_SelectProvider(uint16_t seq)
     return 0U;
 }
 
+/*
+ * SESSION_BEGIN (0x07) is the hard transaction boundary for autonomous update.
+ * It deliberately discards all RAM-only state from a previous transaction:
+ * async READ/Missing/Provider jobs, staged config writes, active write session,
+ * packet bitmap, Guard role, Coordinator/Provider/repair state and old CRC info.
+ *
+ * Request fields:
+ *   seq      = Session Flags;
+ *   param[0:1] = Session ID (LE, must be non-zero).
+ *
+ * A new Session must be followed by SESSION_CRC32 and, when used, SET_GUARD.
+ * Session 0 is reserved for Legacy mode and is rejected here.
+ */
 static void Boot_HandleSessionBegin(const Boot_ControlFrame_t *frame)
 {
     uint8_t data[4] = {0};
@@ -1456,6 +1489,14 @@ static void Boot_HandleReleaseGuard(const Boot_ControlFrame_t *frame)
     (void)Boot_SendResponse(frame->cmd, BOOT_STATUS_READY, data);
 }
 
+/*
+ * ERASE (0x10) invalidates APP metadata before touching APP Flash, then erases
+ * all APP pages.  Two success responses are intentional:
+ *   1) BOOT_STATUS_ERASE immediately after the command is accepted;
+ *   2) BOOT_STATUS_READY only after the full erase has completed.
+ * Host/CANPro must wait for the second response before starting WRITE.
+ * A protected Guard never erases its APP during the primary update phase.
+ */
 static void Boot_HandleErase(uint8_t cmd)
 {
     if (Boot_IsGuardProtected() != 0U)
@@ -1502,6 +1543,15 @@ static void Boot_HandleErase(uint8_t cmd)
     (void)Boot_SendResponse(cmd, BOOT_STATUS_READY, NULL);
 }
 
+/*
+ * WRITE (0x11) opens a logical write session.  It does not carry firmware data;
+ * it only validates target region/size, computes the expected packet count and
+ * clears the per-packet bitmap.  Actual firmware bytes arrive later through
+ * 64-byte logical DATA messages (56-byte payload each).
+ *
+ * APP writes require a successful ERASE first. Config writes are staged in RAM
+ * and committed only by WRITE_END. Bootloader region is always protected.
+ */
 static void Boot_HandleWrite(const Boot_ControlFrame_t *frame)
 {
     uint8_t data[4] = {0};
@@ -1585,6 +1635,14 @@ static void Boot_HandleWrite(const Boot_ControlFrame_t *frame)
     (void)Boot_SendResponse(frame->cmd, BOOT_STATUS_WRITE, data);
 }
 
+/*
+ * READ (0x12) starts a non-blocking Flash read.  frame->seq is the requested
+ * byte count (1..255) and param[0:3] is the 32-bit absolute Flash address.
+ *
+ * There is no immediate "accepted" ACK. Boot_TaskRead() later emits one or
+ * more READY responses, each carrying up to 4 data bytes. This keeps CONTROL
+ * frames fixed at 8 bytes while allowing arbitrary small Flash reads.
+ */
 static void Boot_HandleRead(const Boot_ControlFrame_t *frame)
 {
     uint32_t address;
@@ -1614,6 +1672,17 @@ static void Boot_HandleRead(const Boot_ControlFrame_t *frame)
     g_read_active = 1U;
 }
 
+/*
+ * VERIFY (0x13) is the Legacy verification/commit path.
+ *
+ * It is intentionally forbidden when COORD_COMMIT is active, because a Host
+ * VERIFY would otherwise bypass distributed VERIFY + Prepare/Commit and allow
+ * one node to become bootable before the rest of the cluster is ready.
+ *
+ * Legacy success requires: active APP write session, MissingCount==0, complete
+ * CRC32 match, valid MSP/Reset_Handler vector, and successful metadata write.
+ * Only then is app_valid persisted as 1.
+ */
 static void Boot_HandleVerify(const Boot_ControlFrame_t *frame)
 {
     uint8_t data[4];
@@ -1689,6 +1758,21 @@ static void Boot_HandleVerify(const Boot_ControlFrame_t *frame)
     (void)Boot_SendResponse(frame->cmd, BOOT_STATUS_READY, data);
 }
 
+/*
+ * WRITE_END (0x14) closes the first firmware stream and converts the local
+ * packet bitmap into the next protocol action.
+ *
+ * Legacy/unicast:
+ *   - Missing > 0 : enter REPAIR and stream MISSING_COUNT/MISSING_ITEM to Host;
+ *   - Missing = 0 : enter VERIFY and let Host send Legacy VERIFY.
+ *
+ * Autonomous/broadcast with PEER_RECOVERY:
+ *   - detailed Missing information is sent only through Peer Control;
+ *   - Coordinator election starts only here, AFTER the initial full broadcast;
+ *   - no node is a fixed master during the first DATA injection.
+ *
+ * Config-region WRITE_END commits the RAM staging page instead of APP verify.
+ */
 static void Boot_HandleWriteEnd(const Boot_ControlFrame_t *frame)
 {
     uint8_t data[4] = {0};
@@ -1759,6 +1843,19 @@ static void Boot_HandleWriteEnd(const Boot_ControlFrame_t *frame)
     (void)Boot_SendResponse(frame->cmd, BOOT_STATUS_VERIFY, data);
 }
 
+/*
+ * PROVIDER_GRANT (0x17) is the Legacy Host-directed repair mechanism.
+ * The Host unicasts this CONTROL command to exactly one Provider node and asks
+ * it to send a Sequence range to a target node/broadcast address.
+ *
+ * Broadcast grants are silently ignored by design: allowing multiple healthy
+ * nodes to accept the same grant would make them transmit identical DATA at the
+ * same time and destroy deterministic bus arbitration/repair behavior.
+ *
+ * First response = WRITE (task accepted). Final response = READY only after all
+ * DATA has been handed to the transport and Boot_FlushTx() confirms the physical
+ * Classic fragments/native FD frames have drained.
+ */
 static void Boot_HandleProviderGrant(const Boot_ControlFrame_t *frame)
 {
     uint8_t data[4] = {0};
@@ -2167,6 +2264,23 @@ static void Boot_StartVerifyContext(uint8_t context)
     (void)Boot_SendPeerFrame(target, BOOT_CMD_VERIFY_REQUEST, g_node_id, g_session_id, context);
 }
 
+/*
+ * Consume one 8-byte node-to-node Peer Control frame.
+ *
+ * Logical layout:
+ *   Byte0    Target Node or 0xFF
+ *   Byte1    Peer command
+ *   Byte2    Source Node
+ *   Byte3-4  Session ID (LE)
+ *   Byte5-6  16-bit command value (LE)
+ *   Byte7    CRC8
+ *
+ * The CAN adapter has already checked that CAN ID 0x600+N agrees with Byte2=N.
+ * Core then rejects wrong Target, wrong Session, invalid Source and bad CRC.
+ * Most Peer commands intentionally have no generic ACK: protocol completion is
+ * represented by a paired command (VERIFY_RESULT, COMMIT_ACK...), DATA followed
+ * by PROVIDER_DONE, or a timeout/next recovery phase.
+ */
 static void Boot_ProcessPeerControl(const uint8_t *data, uint8_t len)
 {
     Boot_ControlFrame_t frame;
@@ -2482,6 +2596,20 @@ static void Boot_ProcessPeerControl(const uint8_t *data, uint8_t len)
     }
 }
 
+/*
+ * Consume one complete 64-byte logical firmware DATA packet.
+ *
+ * DATA is transport-independent here: native CAN FD arrives as one 64-byte
+ * frame; Classic CAN has already been reassembled from IDs 0x100..0x107 by the
+ * adapter.  The Core therefore sees exactly the same 64-byte object in both
+ * modes.
+ *
+ * Critical reliability rule: a packet bitmap bit is set ONLY after Flash write
+ * and immediate read-back verification succeed.  Missing/failed packets remain
+ * bit=0 and are repaired later; the initial stream never stalls on one bad Seq.
+ * Duplicate packets whose bit is already 1 are ignored to avoid unnecessary
+ * Flash programming.
+ */
 static void Boot_ProcessData(const uint8_t *data, uint8_t len)
 {
     uint8_t target;
@@ -2592,6 +2720,14 @@ static void Boot_ProcessData(const uint8_t *data, uint8_t len)
     }
 }
 
+/*
+ * Asynchronous READ producer. One Boot_Task() pass emits at most one RESPONSE,
+ * carrying up to 4 Flash bytes. This avoids monopolizing the TX queue and lets
+ * CAN RX / recovery tasks continue to run between read chunks.
+ *
+ * No offset is encoded in each response; Host reconstructs bytes in arrival
+ * order starting from the address/length supplied in the original READ request.
+ */
 static void Boot_TaskRead(void)
 {
     uint8_t data[4] = {0};
@@ -2622,6 +2758,15 @@ static void Boot_TaskRead(void)
     }
 }
 
+/*
+ * Legacy Host-facing Missing report.
+ * First emit exactly one MISSING_COUNT frame containing {missing,total}; then
+ * emit one MISSING_ITEM per missing Sequence.  Only one frame is attempted per
+ * Boot_Task() call, so a busy transport cannot block the main loop.
+ *
+ * Autonomous broadcast mode does NOT use this detailed 0x50x stream; it uses
+ * Boot_TaskPeerMissingReport() on 0x60x to avoid duplicating bus traffic.
+ */
 static void Boot_TaskMissingReport(void)
 {
     uint8_t data[4] = {0};
@@ -2681,6 +2826,17 @@ static void Boot_TaskMissingReport(void)
     g_missing_report_active = 0U;
 }
 
+/*
+ * Provider DATA producer shared by Legacy PROVIDER_GRANT and autonomous repair.
+ * One logical DATA packet is staged per task iteration.  When the last packet is
+ * accepted by the transport, completion is NOT announced immediately: accepted
+ * only means queued/staged, especially in Classic mode where one logical 64-byte
+ * DATA still has eight physical 8-byte fragments to drain.
+ *
+ * g_provider_done_pending therefore forces Boot_FlushTx() before READY or
+ * PROVIDER_DONE is emitted.  Without this barrier the Coordinator could start a
+ * new Missing scan before the final 0x100..0x107 fragments reached the bus.
+ */
 static void Boot_TaskProvider(void)
 {
     uint8_t fd_frame[BOOT_DATA_SIZE];

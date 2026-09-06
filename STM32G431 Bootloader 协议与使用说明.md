@@ -1,4 +1,4 @@
-# STM32G431 多节点 CAN / CAN FD Bootloader 协议与使用说明 V1.2
+# STM32G431 多节点 CAN / CAN FD Bootloader 协议与使用说明 V1.3
 
 > 目标：STM32G431，128 KiB Flash，最多 8 个节点。
 > 核心：`bootloader.c / bootloader.h`。
@@ -8,14 +8,16 @@
 >
 > CANPro/总线逐命令实测帧、可能接收、失败响应与判断方法见 [`COMMAND_TEST_GUIDE.md`](COMMAND_TEST_GUIDE.md)。
 
-## 1. V1.2 目标
+## 1. V1.3 目标
 
-V1.2 同时保留两种工作方式：
+V1.3 完整继承 V1.2 的协议功能，同时保留两种工作方式：
 
 - Legacy：Host 直接完成 ERASE→WRITE→DATA→WRITE_END→VERIFY→JUMP；
 - Autonomous：Host 只负责首次固件注入，随后 8 个 Bootloader 节点自治完成缺包修复、校验、Guard 更新/回滚和协调提交。
 
-自治模式新增：Session ID、Coordinator Claim、确定性 Provider、最多 3 轮 Repair、分布式 VERIFY、7+1 Guard、Rollback、Prepare/Commit。
+V1.2 引入的自治能力包括：Session ID、Coordinator Claim、确定性 Provider、最多 3 轮 Repair、分布式 VERIFY、7+1 Guard、Rollback、Prepare/Commit。
+
+V1.3 不改变命令号、CAN ID、帧格式、CRC 或 Config/Metadata 布局，主要精简 Release 启动框架、Bootloader 中断向量表和 FDCAN FIFO0 中断路径。版本查询更新为 `1.3.0.0`。
 
 Bootloader 本身不支持自升级，Bootloader 区始终受保护。
 
@@ -29,6 +31,8 @@ Bootloader 本身不支持自升级，Bootloader 区始终受保护。
 STM32G431 Flash Page = 2 KiB：Page 0~9 为 Bootloader，Page 10~62 为 APP，Page 63 为 Config/Metadata。
 
 APP 必须链接到 `0x08005000`，启动后设置 `SCB->VTOR = 0x08005000`。
+
+Bootloader 与 APP 可以复用全部 SRAM，因为二者不会同时执行。跳转到 APP 后，APP Reset_Handler 会重新设置 MSP、复制自己的 `.data` 并清零自己的 `.bss`。若需跨跳转传参，应使用备份寄存器、Config/Metadata Flash，或双方 linker 共同约定的 `NOLOAD` RAM 区域，不能依赖普通 `.bss`。
 
 Bootloader linker 已锁定：
 
@@ -53,7 +57,7 @@ typedef struct {
 
 `type` 当前有三类：`BOOT_MESSAGE_CONTROL`、`BOOT_MESSAGE_DATA`、`BOOT_MESSAGE_PEER_CONTROL`。
 
-RX ISR 只做物理帧解析和入队，Flash、CRC、状态机都在 `Boot_Task()` 中执行。
+RX ISR 只检查/清除 FDCAN FIFO0 新消息中断、完成物理帧解析并入队，Flash、CRC、状态机都在 `Boot_Task()` 中执行。V1.3 不再调用覆盖所有 FDCAN 中断源的通用 `HAL_FDCAN_IRQHandler()`。
 主循环：
 
 ```c
@@ -535,15 +539,24 @@ Classic 输出为 CANPro SendList；FD 输出为一行一个 64B DATA 的文本�
 cmake --build --preset Release --clean-first
 ```
 
-当前 V1.2 最近一次 clean build：
+当前 V1.3 最近一次 clean build：
 
 ```text
-RAM   7624 B / 32 KiB   23.27%
-FLASH 19324 B / 20 KiB  94.36%
-0 warning / 0 error
+RAM    7448 B / 32 KiB  22.73%
+FLASH 16488 B / 20 KiB  80.51%
+剩余   3992 B
+0 compiler/linker error
 ```
 
-Bootloader 只剩约 2 KiB Flash 余量，后续继续增加功能前应优先检查体积。
+相对 V1.2 的 19,324 B，V1.3 共减少 2,836 B。Flash 使用量按 ELF 的 `text + data` 计算。Bootloader 与 APP 可以复用 SRAM，但把函数放入 SRAM 并不能直接减小 Flash，因为函数初始镜像仍需存放在 Flash。
+
+V1.3 Release 专用约束：
+
+- 工程保持纯 C，不使用需要 `__libc_init_array` 的 C++ 静态构造器；
+- Bootloader 向量表只保留到 IRQ21（FDCAN1 IT0）；
+- 当前仅启用 FDCAN FIFO0 NEW_MESSAGE；
+- 若以后新增 IRQ22 或更高编号的 Bootloader 外设中断，必须恢复向量表到对应 IRQ；
+- APP 使用自己位于 `0x08005000` 的完整向量表，不受 Bootloader 裁剪影响。
 
 ## 24. 推荐测试顺序
 
@@ -598,7 +611,7 @@ HAL_RCC_DeInit();
 
 ---
 
-本文档与 `README.md`、`bootloader.h`、`bootloader.c`、`boot_port_can_stm32g4.c` 和 `bin_to_boot_frames.py` 对齐到 V1.2。
+本文档与 `README.md`、`bootloader.h`、`bootloader.c`、`boot_port_can_stm32g4.c` 和 `bin_to_boot_frames.py` 对齐到 V1.3。
 ## 27. 自治模式的控制面前提与总线流量
 
 自治恢复主要解决首次 DATA 广播后的 Sequence 缺失，不把关键控制命令丢失当作普通数据缺包。因此 Host 在发送整份 BIN 前，应确认目标节点已经进入同一 Session，并成功完成 ERASE/WRITE 会话建立。

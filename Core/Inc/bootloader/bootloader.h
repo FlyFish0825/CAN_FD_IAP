@@ -57,7 +57,7 @@ extern "C" {
 #define BOOT_BITMAP_SIZE_BYTES        ((BOOT_MAX_PACKET_COUNT + 7UL) / 8UL)
 
 #define BOOT_VERSION_MAJOR            1U
-#define BOOT_VERSION_MINOR            2U
+#define BOOT_VERSION_MINOR            3U
 
 /* Session / autonomous recovery policy. Session 0 keeps legacy behavior. */
 #define BOOT_SESSION_FLAG_PEER_RECOVERY   0x01U

@@ -1,4 +1,4 @@
-# V1.2 Validation Notes
+# V1.3 Validation Notes
 
 ## 1. Bootloader Release 编译
 
@@ -8,15 +8,35 @@
 cmake --build --preset Release --clean-first
 ```
 
-加入安全 Jump RCC/外设清理后的结果：
+V1.3 完成 UART、启动框架、向量表和 FDCAN ISR 体积优化后的 clean build 结果：
 
 ```text
-RAM   7624 B / 32 KiB   23.27%
-FLASH 19324 B / 20 KiB  94.36%
+RAM    7448 B / 32 KiB  22.73%
+FLASH 16488 B / 20 KiB  80.51%
+剩余   3992 B
 0 compiler/linker error
 ```
 
 Linker 固定 `FLASH ORIGIN=0x08000000, LENGTH=20K`，Bootloader 超过 `0x08004FFF` 会直接链接失败。
+
+体积优化前后对比：
+
+| 构建节点 | Flash |
+|---|---:|
+| V1.2 安全 Jump 完成后 | 19,324 B |
+| 删除 UART 后 | 17,688 B |
+| Release 编译细化后 | 17,344 B |
+| V1.3 最终 clean build | **16,488 B** |
+
+V1.3 静态检查结果：
+
+- ELF 类型为 ARM executable，入口指向 Thumb `Reset_Handler`；
+- 无未解析符号；
+- Bootloader 向量表为 152 B，覆盖内核异常和外部 IRQ0~IRQ21；
+- 当前最高且唯一启用的外部中断为 FDCAN1 IT0（IRQ21）；
+- 仅激活 `FDCAN_IT_RX_FIFO0_NEW_MESSAGE`；
+- 通用 `HAL_FDCAN_IRQHandler()` 已不进入最终 ELF；
+- 协议命令、CRC、Config/Metadata 布局及 APP 起始地址均未改变。
 
 ## 2. 协议 / 工具验证
 
@@ -84,15 +104,18 @@ HAL_RCC_DeInit();
 - APP 向量表与 `0x08005000` 偏移；
 - Bootloader→不同 PLL APP 的安全 Jump。
 
-仍需多节点上板验证：
+以上实机结果来自 V1.2 完整功能版本，协议核心在 V1.3 中未改变。V1.3 已完成 clean build 和 ELF 静态检查，但由于启动框架、向量表和 FDCAN 中断入口经过精简，仍需按下面第一项重新做上板回归后，才能把 V1.3 标记为完整实机验证通过。
 
-1. 8 节点 `WRITE_END` 后 Coordinator Claim 时序；
-2. 不同节点丢不同 Sequence 的联合恢复；
-3. 同一 Sequence 多节点缺失只广播一次；
-4. Provider 中途掉线与 10s timeout 换 Provider；
-5. Guard 新版本失败后的自动 Rollback；
-6. Guard FULL_STREAM 更新 + Repair；
-7. Prepare/Commit 与掉电/复位边界；
-8. 正式 CAN FD+BRS 数据面的吞吐与持续接收。
+仍需上板验证：
+
+1. V1.3 上电、GET_VERSION=1.3.0.0、FIFO0 连续接收、ERASE/WRITE/VERIFY/JUMP 基础回归；
+2. 8 节点 `WRITE_END` 后 Coordinator Claim 时序；
+3. 不同节点丢不同 Sequence 的联合恢复；
+4. 同一 Sequence 多节点缺失只广播一次；
+5. Provider 中途掉线与 10s timeout 换 Provider；
+6. Guard 新版本失败后的自动 Rollback；
+7. Guard FULL_STREAM 更新 + Repair；
+8. Prepare/Commit 与掉电/复位边界；
+9. 正式 CAN FD+BRS 数据面的吞吐与持续接收。
 
 当前没有实现“Coordinator 已经成功 Claim 后又掉线”的 heartbeat/重新选主，测试和文档均不得把该能力视为已实现。

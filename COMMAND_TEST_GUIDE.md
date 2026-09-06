@@ -1,6 +1,6 @@
-# STM32G431 Bootloader V1.2 命令测试手册
+# STM32G431 Bootloader V1.3 命令测试手册
 
-本文档用于 **CANPro / 标准 CAN / CAN FD** 实机调试。所有示例均与当前 `bootloader.c` 实现对应，不把“协议设想”当作实际返回。
+本文档用于 **CANPro / 标准 CAN / CAN FD** 实机调试。所有示例均与当前 `bootloader.c` 实现对应，不把“协议设想”当作实际返回。V1.3 与 V1.2 的命令和帧格式兼容，主要变化是 Flash 体积及底层启动/FDCAN 中断实现。
 
 ## 1. 固定测试上下文
 
@@ -56,10 +56,10 @@ Peer Control 默认**不使用 Host RESPONSE ACK**。某些命令有配对 Peer 
 
 ```text
 TX  ID=0x000  01 01 00 00 00 00 00 F6
-RX  ID=0x501  01 01 04 01 02 00 00 B9
+RX  ID=0x501  01 01 04 01 03 00 00 D2
 ```
 
-`Data0..3 = 1.2.0.0`。收到 `Status=0x04 READY` 即成功。
+`Data0..3 = 1.3.0.0`。收到 `Status=0x04 READY` 即成功。
 ### 3.2 GET_DEVICE_ID `0x02`
 
 用途：读取当前 MCU 的 `DBGMCU->IDCODE`。
@@ -567,3 +567,16 @@ JUMP_APP               READY 后观察 APP 行为
 ```
 
 这条路径已验证标准 CAN / CANPro 下载、Flash read-back、CRC32、metadata、Bootloader→APP 时钟清理与跳转。
+
+## 11. V1.3 体积优化专项回归
+
+V1.3 改动了启动框架、Bootloader 向量表和 FDCAN FIFO0 中断入口，但没有改协议状态机。烧录 V1.3 后至少执行：
+
+1. 上电后发送 GET_VERSION，确认返回 `1.3.0.0`；
+2. 连续发送多帧 CONTROL，确认 FIFO0 接收和 RESPONSE 正常；
+3. 完整执行一次 ERASE→WRITE→DATA→WRITE_END→VERIFY；
+4. 执行 JUMP_APP，确认 APP 的 MSP、VTOR、时钟和 SysTick 正常；
+5. 复位后确认有效 APP 可以自动启动；
+6. 人为制造一个 DATA 缺包，确认 Missing/补包流程未受影响。
+
+当前 Bootloader 只启用 FDCAN1 IT0（外部 IRQ21），向量表也只保留到 IRQ21。以后若在 Bootloader 中启用 IRQ22 或更高编号中断，必须先恢复启动文件中的对应向量表项。APP 拥有自己位于 `0x08005000` 的向量表，不受此限制。

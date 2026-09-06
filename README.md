@@ -1,6 +1,15 @@
-# STM32G431 多节点 CAN / CAN FD Bootloader V1.2
+# STM32G431 多节点 CAN / CAN FD Bootloader V1.3
 
 目标芯片：**STM32G431，128 KiB Flash**。Bootloader 固定，不支持 Bootloader 自升级。
+
+V1.3 是基于 V1.2 协议的 **Flash 体积优化版本**。命令、CAN ID、CRC、升级流程和持久化数据格式均保持兼容，`GET_VERSION` 更新为 `1.3.0.0`。本版本主要变化：
+
+- 删除未使用的 UART 初始化和驱动构建依赖；
+- Release 保持 `-Oz + LTO + --gc-sections`，增加跨过程指针分析并抑制小函数过度内联；
+- 纯 C 固件不再链接无用的 GCC CRT/C++ 构造器启动框架；
+- Bootloader 中断向量表裁剪到当前最高使用的 FDCAN1 IT0；
+- FDCAN 接收中断只处理 FIFO0 新消息，不再链接 HAL 通用中断分派器；
+- Release Flash 从 19,324 B 降到 16,488 B，20 KiB 分区剩余 3,992 B。
 
 V1.2 在 V1.1 的广播升级、Bitmap、Missing、Provider、Session、Coordinator 基础上补齐：
 
@@ -24,6 +33,14 @@ V1.2 在 V1.1 的广播升级、Bitmap、Missing、Provider、Session、Coordina
 | Config + APP Metadata | `0x0801F800 ~ 0x0801FFFF` | 2 KiB |
 
 APP 必须链接到 `0x08005000`，并设置 `SCB->VTOR = 0x08005000`。
+
+### Bootloader 与 APP 共用 SRAM
+
+Bootloader 和 APP 不会同时执行，因此二者可以使用同一整块 SRAM，不需要在 linker 中各自划分固定 RAM 分区。Bootloader 跳转前清理中断和外设，设置 APP 的 MSP/VTOR；APP 的 Reset_Handler 随后重新复制自己的 `.data`、清零自己的 `.bss`，Bootloader 原有的普通 RAM 内容自然被复用。
+
+若确实需要从 Bootloader 向 APP 传递少量状态，不应依赖普通 `.bss`。可使用备份寄存器、现有 Config/Metadata Flash 页，或由两个 linker script 共同约定的 `NOLOAD` RAM 小区域。
+
+把函数放到 SRAM 执行通常不会减少 Flash，因为函数初始机器码仍需保存在 Flash 再复制到 RAM。当前 V1.3 使用 SRAM 的重点是允许队列和工作缓冲保持较大，而不为节省 RAM 压缩协议状态。
 
 ### Bootloader → APP 安全跳转
 
@@ -384,12 +401,29 @@ python bin_to_boot_frames.py app_boot.bin \
 cmake --build --preset Release
 ```
 
-当前 V1.2 Release 已 clean build 通过。Linker 已锁定 `FLASH ORIGIN=0x08000000, LENGTH=20K`，超过 `0x08004FFF` 会直接链接失败。
+当前 V1.3 Release 已 clean build 通过。Linker 已锁定 `FLASH ORIGIN=0x08000000, LENGTH=20K`，超过 `0x08004FFF` 会直接链接失败。
 
-最近一次 Release（加入安全 Jump RCC/外设清理后）：`FLASH 19324 B / 20 KiB (94.36%)`，`RAM 7624 B / 32 KiB (23.27%)`。
+```text
+FLASH 16488 B / 20 KiB  80.51%  （剩余 3992 B）
+RAM    7448 B / 32 KiB  22.73%
+0 compiler/linker error
+```
+
+体积变化记录：
+
+| 阶段 | Flash | 相对最初版本减少 |
+|---|---:|---:|
+| V1.2 安全 Jump 完成后 | 19,324 B | — |
+| 删除未使用 UART | 17,688 B | 1,636 B |
+| Release 细化优化、移除空 GPIO 初始化 | 17,344 B | 1,980 B |
+| V1.3 精简启动、向量表和 FDCAN ISR | **16,488 B** | **2,836 B** |
+
+Flash 数值按 ELF 的 `text + data` 统计，不是 `.elf` 文件在电脑上的文件大小。必须使用 Release；Debug 的 `-O0/-g3` 用于调试，不满足 20 KiB 体积约束。
+
+V1.3 的启动文件是纯 C 固件专用配置，不调用静态构造器。向量表目前只覆盖到外部 IRQ21（FDCAN1 IT0）；以后若 Bootloader 新增 IRQ22 或更高编号的外设中断，必须同步恢复向量表至对应表项。
 ## 14. 自治模式总线流量约束
 
-V1.2 最终实现对 `WRITE_END` 后的 Missing 流量做了两点限制：
+自 V1.2 起，`WRITE_END` 后的 Missing 流量有两点限制：
 
 - Legacy/单播流程仍通过 `0x50x` 向 Host 输出完整 Missing Report；
 - 自治广播流程不再重复向 Host 流式发送 `MISSING_ITEM`，详细缺包只走 `0x60x` Peer Control；Host 仍能收到各节点即时 `WRITE_END` 状态。

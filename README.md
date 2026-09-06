@@ -1,873 +1,68 @@
-# STM32G431 多节点 CAN / CAN FD Bootloader V1
+# STM32G431 多节点 CAN / CAN FD Bootloader V1.2
 
-本版本按当前已经确认的协议实现，目标芯片为 **STM32G431，128 KiB Flash**。
+目标芯片：**STM32G431，128 KiB Flash**。Bootloader 固定，不支持 Bootloader 自升级。
 
-当前阶段只实现 **固定 Bootloader + APP 在线升级**，暂不实现 Bootloader 自升级和 Recovery Stub。
+V1.2 在 V1.1 的广播升级、Bitmap、Missing、Provider、Session、Coordinator 基础上补齐：
 
----
+- 首次广播结束后才进行 Coordinator Claim；
+- 确定性 Provider 选择；
+- 最多 3 轮节点自治选择性修复；
+- 新固件分布式 VERIFY；
+- 7+1 Guard 更新与旧版本自动回滚；
+- Prepare / Commit 协调提交；
+- Classic CAN Provider 64B→8×8B 分片发送；
+- CAN FD 原生 64B DATA 保持不变。
+
+> `Session ID = 0` 为 Legacy 兼容模式；不启用自治流程时，原来的单节点/CANPro 手动 ERASE→WRITE→DATA→WRITE_END→VERIFY→JUMP 流程仍可使用。
 
 ## 1. Flash 分区
 
-| 区域 | 地址 | 大小 | Bootloader 写权限 |
+| 区域 | 地址 | 大小 |
+|---|---|---:|
+| Bootloader | `0x08000000 ~ 0x08004FFF` | 20 KiB |
+| APP | `0x08005000 ~ 0x0801F7FF` | 106 KiB |
+| Config + APP Metadata | `0x0801F800 ~ 0x0801FFFF` | 2 KiB |
+
+APP 必须链接到 `0x08005000`，并设置 `SCB->VTOR = 0x08005000`。
+## 2. CAN 映射
+
+| 方向 | 类型 | 标准 ID | 帧 |
 |---|---|---:|---|
-| Bootloader | `0x08000000 ~ 0x08004FFF` | 20 KiB | 禁止 |
-| APP | `0x08005000 ~ 0x0801F7FF` | 106 KiB | 允许 |
-| Config + APP Metadata | `0x0801F800 ~ 0x0801FFFF` | 2 KiB | 允许 |
+| Host/PC → Nodes | CONTROL | `0x000` | Classic CAN，8 Byte |
+| Node → Host/PC | RESPONSE | `0x500 + Node_ID` | Classic CAN，8 Byte |
+| Node → Nodes | PEER CONTROL | `0x600 + Node_ID` | Classic CAN，8 Byte |
+| Host/Provider → Nodes | DATA | `0x100` | CAN FD+BRS，64 Byte |
+| Classic 兼容 DATA | Fragments | `0x100 ~ 0x107` | 8×Classic CAN |
 
-STM32G431 Flash Page = 2 KiB，因此：
+Peer Control 使用 `0x601 ~ 0x608`。低 Node ID 同时具有更低 CAN ID 和更早 Claim 时隙。
 
-- Page 0~9：Bootloader
-- Page 10~62：APP
-- Page 63：Config + Metadata
-
-`ERASE` 只擦 APP Page 10~62，永远不擦 Bootloader。
-
----
-
-## 2. 总线分层
-
-### Classic CAN：控制面
-
-标准 ID：
+当前过滤器：
 
 ```text
-0x000
+Filter0  0x000        Host CONTROL
+Filter1  0x100~0x107  DATA / Classic fragments
+Filter2  0x600~0x60F  Peer Control（Adapter 再限制到 0x601~0x608）
 ```
 
-负责：
+`StdFiltersNbr >= 3`。
 
-- 查询版本/设备信息
-- ENTER_BOOT
-- Guard 设置
-- ERASE
-- WRITE 准备
-- READ
-- WRITE_END
-- VERIFY
-- Missing Report
-- Provider 调度
-- JUMP_APP / RESET
-- GET_STATUS
+## 3. Core / Transport 解耦
 
-### CAN FD：数据面
-
-标准 ID：
-
-```text
-0x100
-```
-
-固定 64 Byte，BRS 开启，只负责固件/配置数据。
-
-节点响应：
-
-```text
-0x500 + Node_ID
-```
-
-例如 Node 1：`0x501`，Node 8：`0x508`。
-
----
-
-## 3. Classic CAN 控制帧
-
-请求固定 8 Byte：
-
-```text
-Byte0      Target
-Byte1      Command
-Byte2      Command-specific field
-Byte3~6    Parameter[4]
-Byte7      CRC8(Byte0~Byte6)
-```
-
-Target：
-
-```text
-0x01 ~ 0x08   指定电机节点
-0xFF          广播
-```
-
-CRC 使用 STM32G431 自带 CRC 外设：
-
-```text
-CRC-8/ATM
-Polynomial = 0x07
-Init       = 0x00
-RefIn      = false
-RefOut     = false
-XorOut     = 0x00
-```
-
-示例：Node1 GET_VERSION：
-
-```text
-01 01 00 00 00 00 00 F6
-```
-
----
-
-## 4. Classic CAN 响应帧
-
-```text
-Byte0      Node ID
-Byte1      Command
-Byte2      Status
-Byte3~6    Data[4]
-Byte7      CRC8(Byte0~Byte6)
-```
-
-状态：
-
-| 值 | 状态 |
-|---:|---|
-| `0x00` | IDLE |
-| `0x01` | ERASE |
-| `0x02` | WRITE |
-| `0x03` | VERIFY / 等待 VERIFY |
-| `0x04` | READY |
-| `0x05` | ERROR |
-| `0x06` | REPAIR |
-| `0x07` | GUARD |
-
----
-
-## 5. 命令表
-
-| CMD | 名称 | 作用 |
-|---:|---|---|
-| `0x01` | GET_VERSION | 返回 Bootloader 版本 |
-| `0x02` | GET_DEVICE_ID | 返回 `DBGMCU->IDCODE` |
-| `0x03` | GET_INFO | Node/HW/APP/Config 状态 |
-| `0x04` | ENTER_BOOT | 保持在 Bootloader |
-| `0x05` | SET_GUARD | 主控指定本轮 Guard 节点 |
-| `0x06` | RELEASE_GUARD | 解除 Guard 写保护 |
-| `0x10` | ERASE | 擦整个 APP 区 |
-| `0x11` | WRITE | 建立 APP/Config 写入会话 |
-| `0x12` | READ | 连续读取内部 Flash |
-| `0x13` | VERIFY | APP CRC32 完整校验 |
-| `0x14` | WRITE_END | 一轮传输结束，统计全部缺包 |
-| `0x15` | MISSING_COUNT | 节点向主控报告缺包总数 |
-| `0x16` | MISSING_ITEM | 节点逐项报告缺失 Sequence |
-| `0x17` | PROVIDER_GRANT | 主控授权唯一 Provider |
-| `0x18` | ABORT | 停止本轮更新，留在 Bootloader |
-| `0x20` | JUMP_APP | 验证后跳 APP |
-| `0x21` | RESET | ACK 后系统复位 |
-| `0x30` | GET_STATUS | 查询状态/错误/进度 |
-
----
-
-## 6. GET_VERSION
-
-返回 4 Byte：
-
-```text
-Major Minor Patch Build
-```
-
-当前：
-
-```text
-1.0.0.0
-```
-
----
-
-## 7. GET_DEVICE_ID
-
-响应 Data[0..3] 为 `DBGMCU->IDCODE`，小端。
-
-该 ID 用于确认 MCU 器件/Revision，不是每块板唯一序列号。
-
----
-
-## 8. GET_INFO
-
-响应：
-
-```text
-Byte3 = Node ID
-Byte4 = Hardware Version
-Byte5 = APP Valid
-Byte6 = Config Valid
-```
-
-`APP Valid` 不是简单看向量表：Bootloader 上电时会根据保存的 `app_size + app_crc32` 使用硬件 CRC32 重新校验 APP。
-
----
-
-## 9. 上电启动逻辑
-
-正常上电 **不等待 500 ms**。
-
-```text
-Reset
-  ↓
-Bootloader
-  ↓
-检查 TAMP Backup Register BOOT Magic
-  ↓
-有 BOOT 请求？ ── 是 ─→ 清 Magic，停在 Bootloader
-  │
-  否
-  ↓
-Config CRC 正确？
-  ↓
-app_valid == 1？
-  ↓
-MSP / Reset_Handler 合法？
-  ↓
-CRC32(APP, app_size) == app_crc32？
-  ↓
-立即 Jump APP
-```
-
-APP 收到 `ENTER_BOOT` 时应：
-
-```text
-ACK
-↓
-TAMP->BKP0R = BOOT_REQUEST_MAGIC
-↓
-NVIC_SystemReset()
-```
-
-系统复位不会清这个 Backup Register，Bootloader 启动后读取并立即清除。
-
----
-
-## 10. SET_GUARD / RELEASE_GUARD
-
-### SET_GUARD
-
-建议由主控广播：
-
-```text
-Byte0 = 0xFF
-Byte1 = 0x05
-Byte2 = Guard Node ID
-Byte3~6 = 0
-Byte7 = CRC8
-```
-
-例如 Guard = Node8。
-
-Guard 第一阶段：
-
-- 可以监听控制帧和 CAN FD 数据；
-- 可以 READ；
-- 可以作为 Provider；
-- **绝不执行 ERASE**；
-- **绝不执行 WRITE**；
-- **绝不执行 WRITE_DATA**；
-- WRITE_END / VERIFY 返回 GUARD 状态。
-
-### RELEASE_GUARD
-
-广播：
-
-```text
-Byte0 = 0xFF
-Byte1 = 0x06
-Byte2 = 原 Guard Node ID
-```
-
-Node1~7 新 APP 全部验证成功后，再解除 Node8 Guard，然后最后升级 Node8。
-
----
-
-## 11. ERASE
-
-```text
-Byte0 = Target / 0xFF
-Byte1 = 0x10
-Byte2~6 = 0
-Byte7 = CRC8
-```
-
-执行顺序：
-
-```text
-先把 app_valid = 0 写入 Config
-↓
-擦除 APP 0x08005000 ~ 0x0801F7FF
-↓
-全部擦完
-↓
-回复 READY
-```
-
-主控必须等目标节点全部完成 ERASE，才能进入 WRITE。
-
-这样升级中途掉电时不会启动残缺 APP。
-
----
-
-## 12. WRITE
-
-```text
-Byte0      Target
-Byte1      0x11
-Byte2      Region
-Byte3~6    Length，Byte，小端 uint32
-Byte7      CRC8
-```
-
-Region：
-
-```text
-0x00 = APP
-0x01 = CONFIG
-0x02 = BOOTLOADER（V1 明确拒绝）
-```
-
-### APP WRITE
-
-起始地址固定：
-
-```text
-0x08005000
-```
-
-不从主控接收写地址，避免错误地址覆盖 Bootloader。
-
-### CONFIG WRITE
-
-起始地址固定：
-
-```text
-0x0801F800
-```
-
-Config 只有 2 KiB，因此实现为：
-
-```text
-先把整页复制到 RAM
-↓
-CAN FD 数据修改 staging buffer
-↓
-WRITE_END 后统一更新 Config CRC
-↓
-擦 Page63
-↓
-整页重新写回
-```
-
-因此未修改的字段和页面剩余数据可以保留。
-
----
-
-## 13. CAN FD WRITE_DATA
-
-标准 ID：
-
-```text
-0x100
-```
-
-固定 64 Byte：
-
-```text
-Byte0      Target
-Byte1      WRITE_DATA = 0x01
-Byte2~3    Sequence，uint16，小端，从 0 开始
-Byte4~7    Reserved = 0
-Byte8~63   Firmware Data = 56 Byte
-```
-
-APP 地址：
-
-```text
-FlashAddress = 0x08005000 + Sequence * 56
-```
-
-56 Byte = `7 × 8 Byte`，天然符合 STM32G431 Flash Double Word 8 Byte 编程粒度。
-
-最后一个包不足 56 Byte：
-
-- CAN FD 剩余区域填 `0xFF`；
-- Flash 最后不足 8 Byte 的 Double Word 填 `0xFF`；
-- APP CRC32 只计算真实 `firmware_size`，不计算填充字节。
-
----
-
-## 14. Packet Bitmap
-
-最大 APP：106 KiB。
-
-```text
-packet_count = ceil(firmware_size / 56)
-```
-
-每个节点维护接收 Bitmap。
-
-一个包只有在：
-
-```text
-CAN FD 正常接收
-↓
-Flash Program 成功
-↓
-Flash Read-back == 本次接收数据
-↓
-bitmap[sequence] = 1
-```
-
-才认为本地拥有这个包。
-
-某个包写失败：
-
-- 不停止后面的数据；
-- bitmap 保持 0；
-- 后续继续接收；
-- WRITE_END 后统一报告缺失。
-
-重复 Sequence：
-
-```text
-bitmap[seq] == 1
-→ 直接忽略
-→ 不重复编程 Flash
-```
-
----
-
-## 15. WRITE_END 和缺包汇总
-
-```text
-Byte1 = 0x14
-```
-
-主控在一轮数据传输完全结束后发送。
-
-节点扫描 Bitmap，然后先报告：
-
-### MISSING_COUNT `0x15`
-
-Data：
-
-```text
-Data0~1 = Missing Count
-Data2~3 = Total Packet Count
-```
-
-然后每个缺失包发：
-
-### MISSING_ITEM `0x16`
-
-```text
-Data0~1 = Missing Sequence
-Data2~3 = Missing Item Index
-```
-
-例如：
-
-```text
-Node2 = {10, 25}
-Node3 = {25, 100}
-Node5 = {25, 200}
-```
-
-主控统一汇总：
-
-```text
-Union = {10, 25, 100, 200}
-```
-
-`Sequence 25` 只需要选择性广播补一次，所有缺 25 的节点一起修复。
-
----
-
-## 16. Provider：单包 + Range
-
-`PROVIDER_GRANT = 0x17` **必须单播给 Provider**，绝不能广播授权。
-
-格式：
-
-```text
-Byte0      Provider Node ID
-Byte1      0x17
-Byte2      Data Target
-Byte3~4    Start Sequence
-Byte5~6    Count
-Byte7      CRC8
-```
-
-`Count = 1`：单包补传。
-
-`Count > 1`：连续 Range。
-
-例如：
-
-```text
-Provider = Node1
-Target   = Node8
-Start    = 0
-Count    = 全部包数
-```
-
-可用于最后升级 Guard。
-
-回滚：
-
-```text
-Provider = Guard
-Target   = 0xFF
-Start    = 0
-Count    = 旧 APP 全部包数
-```
-
-Provider 不是收到授权后一次性把 1900 多个包塞进 TX FIFO，而是由 `BootCAN_Task()` 根据 FDCAN TX FIFO 空间逐包发送。
-
-同一时刻只允许一个 Provider，这是主控状态机必须保证的规则。
-
----
-
-## 17. 包级 Provider 可信规则
-
-Provider **不要求整个 APP 已经 VERIFY OK**。
-
-如果某节点：
-
-```text
-bitmap[105] = 1
-```
-
-则说明该节点的 Packet105 已经成功写 Flash 并通过本地 Read-back，因此可在主控授权下提供 Packet105。
-
-因此可以出现：
-
-```text
-Node1 不完整
-Node2 不完整
-Node3 不完整
-```
-
-但：
-
-```text
-Bitmap1 ∪ Bitmap2 ∪ Bitmap3 ... = Full Firmware
-```
-
-主控仍然可以从不同节点为不同 Sequence 选择 Provider，最终拼出完整固件。
-
-这正是后续论文中“分布式包级固件冗余恢复”的核心。
-
----
-
-## 18. VERIFY
-
-```text
-Byte0      Target
-Byte1      0x13
-Byte2      0
-Byte3~6    Expected APP CRC32
-Byte7      CRC8
-```
-
-CRC32：
-
-```text
-Polynomial = 0x04C11DB7
-Init       = 0xFFFFFFFF
-RefIn      = false
-RefOut     = false
-XorOut     = 0
-```
-
-即 CRC-32/MPEG-2 参数形式，使用 STM32 硬件 CRC 外设计算。
-
-Bootloader：
-
-```text
-CRC32(0x08005000, firmware_size)
-↓
-与 Expected CRC32 比较
-```
-
-成功后永久保存：
-
-```text
-app_size
-app_crc32
-app_valid = 1
-```
-
-到 Page63 的 Config/Metadata 中。
-
-VERIFY 成功后节点只进入 READY，**绝不自行跳 APP**。
-
----
-
-## 19. JUMP_APP
-
-`0x20`。
-
-跳转前再次检查：
-
-- Config 合法；
-- `app_valid == 1`；
-- `app_size` 合法；
-- APP MSP 合法；
-- Reset_Handler 在 APP Flash 内且为 Thumb 地址；
-- 整个 APP CRC32 正确。
-
-只有全部满足才 ACK 并 Jump。
-
-多节点升级中，最终应由中控：
-
-```text
-所有目标节点 READY
-↓
-广播 JUMP_APP
-```
-
-实现统一提交。
-
----
-
-## 20. RESET
-
-`0x21`。
-
-实现为：
-
-```text
-先发送 READY ACK
-↓
-等待 FDCAN TX Queue 尽量发送完
-↓
-NVIC_SystemReset()
-```
-
----
-
-## 21. GET_STATUS
-
-响应：
-
-```text
-Byte3 = 当前 Bootloader Status
-Byte4 = 最近一次 Error Code
-Byte5 = Progress 0~100
-Byte6 = Reserved
-```
-
----
-
-## 22. PCB Config 结构
-
-当前结构固定 84 Byte，位于 Page63 开头：
+Core 只交换 `Boot_Message_t`，不依赖 FDCAN/UART/SPI/I2C：
 
 ```c
-typedef struct
-{
-    uint32_t magic;
-    uint16_t config_version;
-    uint16_t length;
-
-    uint8_t  node_id;
-    uint8_t  hardware_version;
-    uint16_t reserved0;
-
-    uint16_t current_offset_a;
-    uint16_t current_offset_b;
-    uint16_t current_offset_c;
-    uint16_t vbus_offset;
-
-    float current_gain_a;
-    float current_gain_b;
-    float current_gain_c;
-    float vbus_gain;
-
-    uint32_t app_size;
-    uint32_t app_crc32;
-    uint8_t  app_valid;
-    uint8_t  reserved1[3];
-
-    uint32_t reserved[8];
-
-    uint32_t crc32;
-} Boot_PersistConfig_t;
+typedef struct {
+    uint8_t type;
+    uint16_t len;
+    uint8_t data[64];
+} Boot_Message_t;
 ```
-
-保存的是 PCB 个体差异，而不是所有电机都相同的控制参数：
-
-- Node ID；
-- Hardware Version；
-- A/B/C 三相 ADC 原始零电流点；
-- A/B/C 三相 float 增益修正；
-- VBUS ADC 原始零点；
-- VBUS float 增益修正；
-- APP Metadata；
-- Config CRC32。
-
----
-
-## 23. 7+1 Guard 升级流程
-
-主控在升级开始时动态指定 Guard，例如 Node8。
-
-### 新版本第一阶段
+类型：
 
 ```text
-PC 只发送一次 BIN
-        ↓
-中控只做流式转发，不保存完整 BIN
-        ↓
-Node1~7 ERASE + WRITE
-Node8 = Guard，只听，保留旧 APP
-        ↓
-首轮 CAN FD 广播
-        ↓
-汇总所有 Missing Bitmap
-        ↓
-Recovery Round 1
-Recovery Round 2
-Recovery Round 3
-```
-
-每轮均为：
-
-```text
-WRITE_END
-↓
-所有节点完整上报 Missing Set
-↓
-主控求集合并集
-↓
-选择唯一 Provider
-↓
-单包/Range 选择性补传
-↓
-再次 WRITE_END
-```
-
-首轮正常广播 **不计入 3 个恢复轮**。
-
-### Node1~7 成功
-
-```text
-Node1~7 VERIFY OK
-↓
-选一个新固件 Provider
-↓
-RELEASE_GUARD(Node8)
-↓
-ERASE + WRITE Node8
-↓
-Provider Range 发送完整新 APP 给 Node8
-↓
-Node8 VERIFY OK
-↓
-8节点 READY
-↓
-Broadcast JUMP_APP
-```
-
----
-
-## 24. 三轮失败自动回滚
-
-如果新版本经过 3 个补包恢复轮仍然无法完成：
-
-```text
-停止新版本更新
-↓
-Node8 仍保存完整旧 APP
-↓
-Guard 作为旧固件 Provider
-↓
-擦除 Node1~7 当前不完整 APP
-↓
-WRITE(old_app_size)
-↓
-Guard Range 广播旧 APP
-↓
-最多 3 个回滚恢复轮
-↓
-VERIFY old CRC32
-↓
-全部 READY
-↓
-统一 JUMP_APP
-```
-
-如果旧版本回滚也连续 3 个恢复轮失败：
-
-```text
-ABORT
-↓
-停在 Bootloader
-↓
-禁止 JUMP_APP
-↓
-不再无限占用故障总线
-↓
-等待干扰/总线异常解决后重新更新
-```
-
-**三轮计数和自动回滚由中控决定，电机 Bootloader 只负责执行和上报。**
-
----
-
-## 25. 为什么中控不保存完整 BIN 时节点恢复有意义
-
-系统角色：
-
-```text
-PC      = Firmware Origin，一次发送 BIN
-中控    = Coordinator + Streaming Gateway，不持久化完整固件
-电机节点 = Receiver + Distributed Firmware Source
-```
-
-如果 PC 流已经结束，而不同节点分别漏了不同包，中控手里没有完整 BIN 可以随意补发。
-
-但节点 Flash 中已经存在大量成功写入并 Read-back 通过的数据，因此主控可以根据 Missing Set 统一选择 Provider。
-
-即使没有任何一个节点完整，只要所有非 Guard 节点已有数据的并集覆盖完整新固件，也可以互相拼齐。
-
-如果某个 Sequence 在所有升级节点中都缺失，则无法从新版本节点恢复；3轮后自动使用 Guard 的旧版本回滚。
-
----
-
-## 26. FDCAN 配置必须修改
-
-CubeMX / `fdcan.c` 至少确认：
-
-1. `Mode = FDCAN_MODE_NORMAL`，不要 External Loopback。
-2. FDCAN 外设允许 FD+BRS。
-3. `StdFiltersNbr >= 2`。
-4. Filter0 精确接收 `0x000`。
-5. Filter1 精确接收 `0x100`。
-6. STM32G4 HAL 的 Message RAM 元素大小由驱动固定配置，RX/TX 元素本身可容纳 64 Byte FD 数据；CubeMX 中无需寻找 Rx/Tx element-size 配置项。
-7. `FrameFormat` 必须允许 CAN FD + BRS；单帧是否为 Classic CAN 或 CAN FD 由发送 Header 的 `FDFormat/BitRateSwitch` 决定。
-8. 启动 RX FIFO0 NEW MESSAGE 中断。
-
-当前 Ring Buffer 已扩展到 64 Byte 数据，并采用：
-
-```text
-FDCAN IRQ
-↓
-快速取硬件 FIFO
-↓
-32项 Ring Buffer
-↓
-主循环 BootCAN_RX_Process()
-↓
-BootCAN_Task()
-```
-
-Flash 编程、CRC、协议状态机都不放在 FDCAN 中断里。
-
----
-
-## 27. main.c 使用
-
-参考：
-
-```text
-integration/main_integration_example.c
+BOOT_MESSAGE_CONTROL       Host请求 / Node响应
+BOOT_MESSAGE_DATA          固件DATA
+BOOT_MESSAGE_PEER_CONTROL  节点间协调控制
 ```
 
 主循环：
@@ -875,103 +70,281 @@ integration/main_integration_example.c
 ```c
 while (1)
 {
-    BootCAN_RX_Process(&boot_rx);
-    BootCAN_Task();
+    BootPort_CAN_Task(&hfdcan1);  /* Classic Provider TX 分片 */
+    Boot_Task();
 }
 ```
 
-`BootCAN_Task()` 很重要，它负责：
+RX 中断只完成物理帧→`Boot_Message_t`映射和入队，Flash/CRC/恢复状态机都在 `Boot_Task()` 执行。
 
-- READ 连续返回；
-- Missing List 分帧上报；
-- Provider 单包/Range 非阻塞发送。
+## 4. Host CONTROL / RESPONSE
 
----
-
-## 28. APP 工程必须改两件事
-
-### APP Flash 地址
-
-Linker：
+Host 请求固定 8 Byte：
 
 ```text
-ORIGIN = 0x08005000
-LENGTH = 106K
+Byte0      Target：0x01~0x08 / 0xFF
+Byte1      Command
+Byte2      Command-specific
+Byte3~6    Parameter[4]
+Byte7      CRC8(Byte0~Byte6)
 ```
 
-### APP Vector Table
+响应：`[Node, Command, Status, Data0..3, CRC8]`。
 
-APP 自己的 `SystemInit()` 运行后，VTOR 必须仍然指向：
+CRC8：Poly=`0x07`，Init=`0x00`，无反射，XorOut=`0`。
+APP CRC32：Poly=`0x04C11DB7`，Init=`0xFFFFFFFF`，无反射，XorOut=`0`。
+## 5. Session 与 DATA
+
+`SESSION_BEGIN = 0x07`：
 
 ```text
-0x08005000
+Byte0      Target，自治模式通常 0xFF
+Byte1      0x07
+Byte2      Flags
+Byte3~4    Session ID，uint16 LE，非0
+Byte5~6    Reserved
+Byte7      CRC8
 ```
 
-否则 APP 虽然能进入 `main()`，中断可能跳回 Bootloader 的向量表。
-
-详见：
+Flags：
 
 ```text
-integration/linker_and_vector_notes.txt
+bit0  PEER_RECOVERY   节点自治修复
+bit1  GUARD_ROLLBACK  新版本失败允许由Guard回滚
+bit2  COORD_COMMIT    启用分布式VERIFY + Prepare/Commit
 ```
 
----
+`SESSION_CRC32 = 0x08` 用于在自治提交前保存本次新 APP 的 Expected CRC32。
 
-## 29. PC 端 CRC / 打包参考
+DATA 64 Byte：
 
-`tools/boot_protocol_reference.py` 提供：
+```text
+Byte0       Target
+Byte1       WRITE_DATA = 0x01
+Byte2~3     Sequence，uint16 LE
+Byte4~5     Session ID，uint16 LE
+Byte6~7     Reserved = 0
+Byte8~63    Firmware Payload = 56 Byte
+```
 
-- CRC8/ATM；
-- STM32 CRC32；
-- Classic CAN 控制帧生成；
-- WRITE / READ / VERIFY；
-- SET/RELEASE Guard；
-- PROVIDER_GRANT；
-- 56 Byte 固件分包；
-- Missing Set 合并；
-- 响应 CRC 校验。
+地址=`0x08005000 + Sequence*56`。最后一包补 `0xFF`，CRC32 只覆盖真实 firmware_size。
+## 6. 命令表
 
-可先直接运行：
+| CMD | 名称 | 作用 |
+|---:|---|---|
+| `0x01` | GET_VERSION | Bootloader版本 |
+| `0x02` | GET_DEVICE_ID | `DBGMCU->IDCODE` |
+| `0x03` | GET_INFO | Node/HW/APP/Config |
+| `0x04` | ENTER_BOOT | 保持Bootloader |
+| `0x05` | SET_GUARD | 指定Guard |
+| `0x06` | RELEASE_GUARD | 解除Guard |
+| `0x07` | SESSION_BEGIN | 建立自治升级Session |
+| `0x08` | SESSION_CRC32 | 设置本次新APP Expected CRC32 |
+| `0x10` | ERASE | 擦除APP |
+| `0x11` | WRITE | 建立写会话 |
+| `0x12` | READ | 读取内部Flash |
+| `0x13` | VERIFY | Legacy APP CRC32校验 |
+| `0x14` | WRITE_END | 首次广播结束/Bitmap扫描 |
+| `0x15` | MISSING_COUNT | 缺包数量 |
+| `0x16` | MISSING_ITEM | 缺失Sequence |
+| `0x17` | PROVIDER_GRANT | Legacy Host指定Provider |
+| `0x18` | ABORT | 中止 |
+| `0x19` | COORDINATOR_CLAIM | Coordinator声明 |
+| `0x1A` | PROVIDER_ASSIGN | 自治单包Provider指派 |
+| `0x1B` | PROVIDER_DONE | Provider完成 |
+| `0x1C` | REPAIR_ROUND_END | 请求新一轮Missing报告 |
+| `0x1D` | RECOVERY_READY | 自治恢复完成 |
+| `0x1E` | RECOVERY_FAILED | 自治恢复失败 |
+| `0x20` | JUMP_APP | Legacy验证后跳APP |
+| `0x21` | RESET | ACK后复位 |
+| `0x22` | VERIFY_REQUEST | Coordinator请求节点校验 |
+| `0x23` | VERIFY_RESULT | 节点返回校验结果 |
+| `0x24` | GUARD_UPDATE_BEGIN | 释放并准备更新Guard |
+| `0x25` | GUARD_UPDATE_READY | Guard擦除/准备完成 |
+| `0x26` | ROLLBACK_REQUEST | Coordinator请求Guard旧镜像元数据 |
+| `0x27` | ROLLBACK_SIZE_LO | 旧APP size低16位 |
+| `0x28` | ROLLBACK_SIZE_HI | 旧APP size高16位 |
+| `0x29` | ROLLBACK_CRC_LO | 旧APP CRC低16位 |
+| `0x2A` | ROLLBACK_CRC_HI | 旧APP CRC高16位 |
+| `0x2B` | ROLLBACK_BEGIN | 节点擦除并准备接收旧镜像 |
+| `0x2C` | ROLLBACK_PREPARED | 节点回滚准备完成 |
+| `0x2D` | FULL_STREAM | Provider发送完整镜像 |
+| `0x2E` | COMMIT_PREPARE | Prepare阶段 |
+| `0x2F` | COMMIT_ACK | 节点已具备提交条件 |
+| `0x30` | GET_STATUS | 状态/错误/进度 |
+| `0x31` | COMMIT_EXECUTE | Commit执行并统一跳APP |
+
+## 7. 自治升级流程
+
+第一次固件广播阶段不设置 Coordinator。Host 负责：
+
+```text
+SESSION_BEGIN
+SET_GUARD（可选）
+ERASE / WRITE
+DATA Sequence 0..N
+WRITE_END
+```
+
+`WRITE_END` 后各非Guard节点自动发送 Missing 信息，并进入 Coordinator Claim。
+确定性规则：
+
+```text
+Coordinator = 参与本次升级且成功Claim的最低 Node ID
+Provider    = 拥有目标Sequence、非Guard、优先级最高（最低Node ID）的节点
+```
+
+Claim 使用 ID 时隙：Node1 最早，随后 Node2…Node8。较低 ID 未在线/未Claim时，后续节点自然接管。
+
+Coordinator 收集所有节点 Missing 集合后，对缺失 Sequence 做并集修复。同一个 Sequence 多节点缺失时只广播一次。
+
+每轮修复结束后重新报告 Missing，初始广播不计入 Repair Round；最多 3 轮。新版本修复失败时：若启用了 Guard Rollback，则进入回滚；否则 `RECOVERY_FAILED`。
+
+## 8. 7+1 Guard 与自动回滚
+
+Guard 在第一阶段保持旧APP：
+
+```text
+SET_GUARD
+↓
+7个普通节点擦除/写新APP
+Guard只监听，不擦除、不写入
+```
+
+若普通节点新版本在修复/VERIFY阶段失败：
+
+```text
+Coordinator → ROLLBACK_REQUEST
+Guard → 返回旧APP size + CRC32
+普通节点 → 擦APP并进入ROLLBACK_PREP
+Guard → FULL_STREAM广播旧APP
+缺包 → 最多3轮选择性修复
+所有节点 → CRC32 VERIFY旧APP
+```
+
+回滚本身仍失败时进入 `RECOVERY_FAILED`，节点保持Bootloader，不跳APP。
+普通节点新版本全部 VERIFY 成功后才更新 Guard：
+
+```text
+Coordinator → GUARD_UPDATE_BEGIN
+Guard解除保护、擦除旧APP
+最低 Node ID 的合格新版本 Provider → FULL_STREAM到Guard
+Guard缺包则进入选择性修复
+Guard VERIFY新APP
+↓
+Prepare / Commit
+```
+
+因此旧版本回滚能力只覆盖“7个普通节点的新版本阶段”；一旦进入 Guard 更新阶段，旧Guard镜像已被释放。
+
+## 9. Prepare / Commit
+
+自治模式不会在单个节点 VERIFY 成功后立即设置 `app_valid=1`。
+
+VERIFY 成功时先保存：
+
+```text
+app_size
+app_crc32
+app_valid = 0
+```
+
+即“镜像已验证但尚未提交”。Coordinator 确认所有目标节点准备完成后：
+
+```text
+COMMIT_PREPARE
+↓
+所有节点验证本地镜像可启动
+↓
+COMMIT_ACK
+↓
+Coordinator收齐ACK
+↓
+COMMIT_EXECUTE（重复3次）
+↓
+各节点持久化 app_valid=1
+↓
+短延时后统一 Jump APP
+```
+
+任何节点未准备好时不执行全局 Commit。
+## 10. 状态 / 错误 / Recovery Phase
+
+Status：`IDLE=0x00, ERASE=0x01, WRITE=0x02, VERIFY=0x03, READY=0x04, ERROR=0x05, REPAIR=0x06, GUARD=0x07`。
+
+新增错误：
+
+```text
+0x12 SESSION
+0x13 COORDINATOR
+0x14 RECOVERY_FAILED
+0x15 COMMIT
+```
+
+Recovery Phase：
+
+```text
+0x00 IDLE
+0x01 NEW_REPAIR
+0x02 NEW_VERIFY
+0x03 GUARD_UPDATE
+0x04 GUARD_REPAIR
+0x05 ROLLBACK_META
+0x06 ROLLBACK_PREP
+0x07 ROLLBACK_REPAIR
+0x08 ROLLBACK_VERIFY
+0x09 COMMIT
+0x0A FAILED
+```
+
+调试 API：`Boot_GetSessionId()`、`Boot_GetCoordinatorId()`、`Boot_IsCoordinator()`、`Boot_GetRepairRound()`、`Boot_GetRecoveryPhase()`。
+
+## 11. Classic CAN / CAN FD
+
+正式 CAN FD：一个逻辑 DATA 就是一帧 `ID=0x100, FD=1, BRS=1, DLC=64`。
+
+Classic 兼容：同一逻辑 64B DATA 严格拆为 `0x100~0x107` 八帧，每帧8B；丢片/乱序时整包丢弃，最终由 Sequence Bitmap 判为 Missing。
+## 12. bin_to_boot_frames.py
+
+Legacy 单节点/手动模式：
 
 ```bash
-python boot_protocol_reference.py
+python bin_to_boot_frames.py app_boot.bin --mode classic --target 1
 ```
 
-参考校验值：
+完整 8 节点自治模式示例：
 
-```text
-CRC8("123456789")  = 0xF4
-CRC32("123456789") = 0x0376E6E7
+```bash
+python bin_to_boot_frames.py app_boot.bin \
+  --mode classic \
+  --target 0xFF \
+  --session 0x1234 \
+  --session-flags 0x07 \
+  --guard 8
 ```
 
----
+脚本打印：Firmware size、Packet count、APP CRC32、SESSION_BEGIN、SESSION_CRC32、SET_GUARD、ERASE、WRITE、WRITE_END，以及控制帧；COORD_COMMIT 模式会省略 Legacy VERIFY，并生成 Classic CANPro 列表或 CAN FD 帧列表。
 
-## 30. 当前 V1 的边界
+正式 CAN FD 使用 `--mode fd`。
 
-已经实现节点侧：
+## 13. Release 编译
 
-- 固定 20 KiB Bootloader；
-- 直接启动 APP；
-- Backup Register ENTER_BOOT；
-- Classic CAN 控制面；
-- CAN FD 64 Byte 数据面；
-- APP 边收边写；
-- 56 Byte packet；
-- Bitmap；
-- 不中断丢包；
-- Missing Count / Item；
-- 包级 Provider；
-- 单包 / Range Provider；
-- Guard 保护；
-- APP CRC32；
-- Config + Metadata；
-- Flash READ；
-- 统一 JUMP_APP 所需节点行为。
+```bash
+cmake --build --preset Release
+```
 
-暂未实现：
+当前 V1.2 Release 已 clean build 通过。Linker 已锁定 `FLASH ORIGIN=0x08000000, LENGTH=20K`，超过 `0x08004FFF` 会直接链接失败。
 
-- Bootloader 自升级；
-- Recovery Stub；
-- 中控侧完整 7+1 / 3-round / rollback 状态机代码。
+最近一次 Release：`FLASH 19132 B / 20 KiB (93.42%)`，`RAM 7624 B / 32 KiB (23.27%)`。
+## 14. 自治模式总线流量约束
 
-后两项不会影响当前 APP OTA 主链路验证；中控状态机可以直接基于本协议继续实现。
+V1.2 最终实现对 `WRITE_END` 后的 Missing 流量做了两点限制：
+
+- Legacy/单播流程仍通过 `0x50x` 向 Host 输出完整 Missing Report；
+- 自治广播流程不再重复向 Host 流式发送 `MISSING_ITEM`，详细缺包只走 `0x60x` Peer Control；Host 仍能收到各节点即时 `WRITE_END` 状态。
+
+Peer Missing Report 先发送 `MISSING_COUNT`，随后等待 `BOOT_PEER_MISSING_ITEM_DELAY_MS=20 ms` 再发送明细，使 Node1~Node8 有机会先完成 Count/在线声明，避免低 CAN ID 节点连续 Missing Item 长时间压住高 ID 节点。
+
+`SESSION_BEGIN` 是新的事务边界：会取消旧异步任务/旧写会话、清 Bitmap、清 RAM 中旧 Guard 角色；因此完整自治流程应按 `SESSION_BEGIN → SESSION_CRC32 → SET_GUARD → ERASE → WRITE` 的顺序开始。
+
+Host 在首次广播 DATA 前仍应确认目标节点已经成功接收关键控制面命令（尤其是 SESSION/ERASE/WRITE）；自治恢复针对的是 DATA 缺包，不把“节点连 WRITE 会话都没建立”当作普通 Sequence 缺包处理。

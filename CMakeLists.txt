@@ -60,6 +60,13 @@ target_compile_options(STM32_Drivers PRIVATE
     $<$<CONFIG:Release>:${BOOT_RELEASE_SIZE_OPTIONS}>
 )
 
+# The STM32 startup file already sets MSP and initializes .data/.bss.  This is
+# a C-only firmware with no static constructors, so the generic GCC crt0 /
+# crtbegin / crtend startup objects are unnecessary in the size build.
+target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
+    $<$<CONFIG:Release>:-nostartfiles>
+)
+
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths

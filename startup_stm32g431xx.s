@@ -95,8 +95,9 @@ FillZerobss:
 LoopFillZerobss:
   cmp r2, r4
   bcc FillZerobss
-/* Call static constructors */
-    bl __libc_init_array
+/* This project is C-only and has no static constructors.  Skipping
+   __libc_init_array lets the Release link omit the generic GCC CRT startup
+   framework; .data and .bss have already been initialized above. */
 /* Call the application's entry point.*/
 	bl	main
 
@@ -168,86 +169,11 @@ g_pfnVectors:
 	.word	USB_HP_IRQHandler
 	.word	USB_LP_IRQHandler
 	.word	FDCAN1_IT0_IRQHandler
-	.word	FDCAN1_IT1_IRQHandler
-	.word	EXTI9_5_IRQHandler
-	.word	TIM1_BRK_TIM15_IRQHandler
-	.word	TIM1_UP_TIM16_IRQHandler
-	.word	TIM1_TRG_COM_TIM17_IRQHandler
-	.word	TIM1_CC_IRQHandler
-	.word	TIM2_IRQHandler
-	.word	TIM3_IRQHandler
-	.word	TIM4_IRQHandler
-	.word	I2C1_EV_IRQHandler
-	.word	I2C1_ER_IRQHandler
-	.word	I2C2_EV_IRQHandler
-	.word	I2C2_ER_IRQHandler
-	.word	SPI1_IRQHandler
-	.word	SPI2_IRQHandler
-	.word	USART1_IRQHandler
-	.word	USART2_IRQHandler
-	.word	USART3_IRQHandler
-	.word	EXTI15_10_IRQHandler
-	.word	RTC_Alarm_IRQHandler
-	.word	USBWakeUp_IRQHandler
-	.word	TIM8_BRK_IRQHandler
-	.word	TIM8_UP_IRQHandler
-	.word	TIM8_TRG_COM_IRQHandler
-	.word	TIM8_CC_IRQHandler
-	.word	0
-	.word	0
-	.word	LPTIM1_IRQHandler
-	.word	0
-	.word	SPI3_IRQHandler
-	.word	UART4_IRQHandler
-	.word	0
-	.word	TIM6_DAC_IRQHandler
-	.word	TIM7_IRQHandler
-	.word	DMA2_Channel1_IRQHandler
-	.word	DMA2_Channel2_IRQHandler
-	.word	DMA2_Channel3_IRQHandler
-	.word	DMA2_Channel4_IRQHandler
-	.word	DMA2_Channel5_IRQHandler
-	.word	0
-	.word	0
-	.word	UCPD1_IRQHandler
-	.word	COMP1_2_3_IRQHandler
-	.word	COMP4_IRQHandler
-	.word	0
-	.word	0
-	.word	0
-	.word	0
-	.word	0
-	.word	0
-	.word	0
-	.word	0
-	.word	0
-	.word	CRS_IRQHandler
-	.word	SAI1_IRQHandler
-	.word	0
-	.word	0
-	.word	0
-	.word	0
-	.word	FPU_IRQHandler
-	.word	0
-	.word	0
-	.word	0
-	.word	0
-	.word	0
-	.word	0
-	.word	0
-	.word	0
-	.word	RNG_IRQHandler
-	.word	LPUART1_IRQHandler
-	.word	I2C3_EV_IRQHandler
-	.word	I2C3_ER_IRQHandler
-	.word	DMAMUX_OVR_IRQHandler
-	.word	0
-	.word	0
-	.word	DMA2_Channel6_IRQHandler
-	.word	0
-	.word	0
-	.word	CORDIC_IRQHandler
-	.word	FMAC_IRQHandler
+
+/* Bootloader vector table intentionally ends at external IRQ 21
+   (FDCAN1_IT0), the highest interrupt enabled by this image.  The APP owns a
+   separate vector table.  If a future Bootloader peripheral enables IRQ 22
+   or higher, restore all table entries through that IRQ before using it. */
 
 	.size	g_pfnVectors, .-g_pfnVectors
 
@@ -495,4 +421,3 @@ g_pfnVectors:
 
 	.weak	FMAC_IRQHandler
 	.thumb_set FMAC_IRQHandler,Default_Handler
-

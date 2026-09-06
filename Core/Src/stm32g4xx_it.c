@@ -208,9 +208,19 @@ void SysTick_Handler(void)
 void FDCAN1_IT0_IRQHandler(void)
 {
   /* USER CODE BEGIN FDCAN1_IT0_IRQn 0 */
+  /* Only RX FIFO0 NEW_MESSAGE is enabled by this Bootloader.  Handling that
+     one source directly avoids linking HAL_FDCAN_IRQHandler(), whose generic
+     dispatcher also covers unused TX, FIFO1 and error notifications. */
+  const uint32_t rx_fifo0_its = hfdcan1.Instance->IR
+                              & hfdcan1.Instance->IE
+                              & FDCAN_IT_RX_FIFO0_NEW_MESSAGE;
 
+  if (rx_fifo0_its != 0U)
+  {
+    __HAL_FDCAN_CLEAR_FLAG(&hfdcan1, rx_fifo0_its);
+    BootPort_CAN_RxFifo0Callback(&hfdcan1, rx_fifo0_its);
+  }
   /* USER CODE END FDCAN1_IT0_IRQn 0 */
-  HAL_FDCAN_IRQHandler(&hfdcan1);
   /* USER CODE BEGIN FDCAN1_IT0_IRQn 1 */
 
   /* USER CODE END FDCAN1_IT0_IRQn 1 */
@@ -231,12 +241,5 @@ void FDCAN1_IT1_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-
-void HAL_FDCAN_RxFifo0Callback(FDCAN_HandleTypeDef *hfdcan,
-                               uint32_t RxFifo0ITs)
-{
-  BootPort_CAN_RxFifo0Callback(hfdcan, RxFifo0ITs);
-  
-}
 
 /* USER CODE END 1 */

@@ -372,28 +372,216 @@ Recovery Phase：
 正式 CAN FD：一个逻辑 DATA 就是一帧 `ID=0x100, FD=1, BRS=1, DLC=64`。
 
 Classic 兼容：同一逻辑 64B DATA 严格拆为 `0x100~0x107` 八帧，每帧8B；丢片/乱序时整包丢弃，最终由 Sequence Bitmap 判为 Missing。
-## 12. bin_to_boot_frames.py
+## 12. `bin_to_boot_frames.py`：固件帧生成、下载与校验
 
-Legacy 单节点/手动模式：
+`bin_to_boot_frames.py` 用于把已经链接到 APP 区的 `.bin` 转换为 Bootloader DATA 帧，同时计算本次升级必须使用的固件长度、逻辑包数量和 APP CRC32。它**负责生成帧，不负责直接操作 CAN 适配器**；实际发送仍由 CANPro 或其它 CAN 工具完成。
 
-```bash
-python bin_to_boot_frames.py app_boot.bin --mode classic --target 1
+脚本当前支持两种数据输出：
+
+- `classic`：把每个 64B 逻辑 DATA 拆成 `0x100~0x107` 共 8 个 Classic CAN 标准帧，可直接生成当前 CANPro 使用的 SendList；
+- `fd`：每个 64B 逻辑 DATA 生成一条 `ID=0x100, FD=1, BRS=1, DLC=64` 的文本记录；当前输出是通用文本，不是已经验证过的 CANPro FD XML；
+- `both`：同时生成以上两种文件。
+
+### 12.1 最常用：单节点 Legacy + Classic CANPro
+
+Node1 第一次测试建议使用 1 ms 物理帧间隔：
+
+```bat
+python bin_to_boot_frames.py Observer_boot.bin --mode classic --target 1 --session 0 --interval 1 -o Observer_single_node_test
 ```
 
-完整 8 节点自治模式示例：
+生成：
 
-```bash
-python bin_to_boot_frames.py app_boot.bin \
-  --mode classic \
-  --target 0xFF \
-  --session 0x1234 \
-  --session-flags 0x07 \
-  --guard 8
+```text
+Observer_single_node_test.classic.canpro.list
 ```
 
-脚本打印：Firmware size、Packet count、APP CRC32、SESSION_BEGIN、SESSION_CRC32、SET_GUARD、ERASE、WRITE、WRITE_END，以及控制帧；COORD_COMMIT 模式会省略 Legacy VERIFY，并生成 Classic CANPro 列表或 CAN FD 帧列表。
+终端同时打印：
 
-正式 CAN FD 使用 `--mode fd`。
+```text
+Firmware size : <本次 BIN 实际字节数>
+Packet count  : <ceil(size / 56)>
+APP CRC32     : <本次 BIN 的 CRC32/MPEG-2>
+
+ERASE         : ...
+WRITE         : ...
+WRITE_END     : ...
+VERIFY(legacy): ...
+```
+
+> 每次重新编译 APP 后都应重新运行脚本。固件长度、包数和 CRC32 可能变化，尤其不要复用旧版本的 `VERIFY` 帧。脚本使用的是 STM32/MPEG-2 风格 CRC32（poly `0x04C11DB7`、初值 `0xFFFFFFFF`），不要直接拿常见 zlib/ZIP CRC32 数值代替。
+
+### 12.2 参数说明
+
+| 参数 | 示例 | 说明 |
+|---|---|---|
+| `bin` | `Observer_boot.bin` | 输入 APP BIN，必须是直接链接到 `0x08005000` 后导出的 BIN |
+| `--mode` | `classic` | `classic / fd / both`，默认 `both` |
+| `--target` | `1` | 目标 Node；正常节点为 `1~8`，广播为 `0xFF` |
+| `--session` | `0` | `0` 为 Legacy；非 0 为自治升级 Session ID |
+| `--session-flags` | `0x07` | bit0 Peer Repair；bit1 Guard Rollback；bit2 Coordinated Commit |
+| `--guard` | `8` | Guard Node ID；`0` 表示不生成 `SET_GUARD` |
+| `--interval` | `1` | Classic 物理帧间隔，单位 ms；脚本默认 `0.1`，首次实测建议 `1` |
+| `-o / --out-prefix` | `Observer_test` | 输出文件名前缀；省略时使用输入 BIN 文件名 |
+
+脚本会拒绝空 BIN、超过当前 106 KiB APP 区的 BIN、非法 Session/Flags/Guard 参数。
+
+Session Flags：
+
+```text
+0x01 = PEER_RECOVERY
+0x02 = GUARD_ROLLBACK
+0x04 = COORD_COMMIT
+0x07 = 三项全部启用（完整自治模式）
+```
+
+### 12.3 DATA 包格式与 Classic 拆帧
+
+每 56B 固件数据构成一个固定 64B 逻辑 DATA：
+
+```text
+Byte0       Target
+Byte1       WRITE_DATA = 0x01
+Byte2~3     Sequence，uint16 LE
+Byte4~5     Session ID，uint16 LE；Legacy = 0
+Byte6~7     Reserved = 0
+Byte8~63    56B firmware payload
+```
+
+最后一包不足 56B 时脚本用 `0xFF` 补齐，但 APP CRC32 只覆盖真实 BIN 长度。
+
+Classic 模式严格拆为：
+
+```text
+0x100 = logical Byte  0..7
+0x101 = logical Byte  8..15
+0x102 = logical Byte 16..23
+0x103 = logical Byte 24..31
+0x104 = logical Byte 32..39
+0x105 = logical Byte 40..47
+0x106 = logical Byte 48..55
+0x107 = logical Byte 56..63
+```
+
+因此 `N` 个逻辑包会生成 `N * 8` 个 Classic CAN 物理帧。接收端要求 `0x100→...→0x107` 严格连续；某一分片丢失或乱序时，整份 64B 逻辑包被丢弃，最终由 Sequence Bitmap 报 Missing。
+
+### 12.4 CANPro 单节点完整下载顺序
+
+以下以 Node1 为例：Host 控制 ID=`0x000`，Node1 Response ID=`0x501`，均为 11-bit Standard Classic CAN、DLC=8。
+
+1. 可先发 `GET_VERSION`，确认 Bootloader 在线；
+2. 发送脚本打印的 `ERASE`；必须等到节点先回 `ERASE` 状态、再回 `READY`，第二帧出现后才能继续；
+3. 发送脚本打印的 `WRITE`；核对返回的 Packet Count 是否等于脚本打印值；
+4. 在 CANPro 中加载并发送 `.classic.canpro.list`，整个列表执行一次；DATA 阶段没有逐包 ACK；
+5. 所有 DATA 物理帧发送完成后，再发送脚本打印的 `WRITE_END`；
+6. 检查 `MISSING_COUNT`：只有 `Missing=0` 才进入最终 VERIFY；
+7. 发送**本次脚本打印的** `VERIFY(legacy)`；节点返回的实际 CRC32 必须与脚本 `APP CRC32` 一致；
+8. VERIFY 成功后可选用 `READ` 抽查 APP 向量表；
+9. 最后发送 `JUMP_APP`，观察节点停止响应 Bootloader 命令并由 APP 正常运行。
+
+详细的 8 字节控制帧、状态值和错误响应见 [`COMMAND_TEST_GUIDE.md`](COMMAND_TEST_GUIDE.md)。
+
+### 12.5 下载校验：不要只看“CAN 发完了”
+
+建议把一次升级分为四层校验：
+
+**第一层：Packet Count**
+
+`WRITE` 返回的总包数必须与脚本 `Packet count` 完全一致。逻辑包数计算为：
+
+```text
+Packet count = ceil(Firmware size / 56)
+Classic physical frames = Packet count * 8
+```
+
+**第二层：Missing Bitmap**
+
+`WRITE_END` 后检查 `MISSING_COUNT`：
+
+```text
+Missing = 0  → 所有逻辑包均已 Flash program + read-back 成功
+Missing > 0  → 仍有 Sequence 需要补发，不应执行 VERIFY
+```
+
+如果是 Legacy 手工测试，最简单的补发方式可以直接再次发送完整 `.classic.canpro.list`：已经成功且 Bitmap=1 的 Sequence 会被忽略，缺失 Sequence 会重新写入。补发完成后再次发送 `WRITE_END`，直到 `Missing=0`。
+
+**第三层：整镜像 CRC32**
+
+`Missing=0` 后仍必须执行 `VERIFY`。Bootloader 对 `0x08005000` 起、真实 `Firmware size` 长度重新计算 CRC32，并与脚本打印值比较。只有 CRC 匹配、APP MSP/Reset_Handler 也合法时，Legacy VERIFY 才会持久化 `app_valid=1`。
+
+如果节点返回 `ERROR` 且携带了实际 CRC，请先比较：
+
+```text
+Script APP CRC32
+vs.
+Node Actual Flash CRC32
+```
+
+若两者不同，不要 JUMP。最常见原因之一是 CANPro 使用了旧 `.list`，或者手工发送了旧版本脚本打印的 VERIFY CRC。
+
+**第四层：READ + JUMP（推荐调试阶段使用）**
+
+可以用 `READ 0x08005000` 抽查向量表。前 8B 应能解析为：
+
+```text
+[0..3] MSP           → STM32G431 SRAM 合法地址
+[4..7] Reset_Handler → 位于 APP 区且最低位为 1（Thumb）
+```
+
+具体 Reset_Handler 地址会随每次编译变化，不应写死。VERIFY 成功后再 `JUMP_APP`，APP 能正常运行才算完成端到端验证。
+
+### 12.6 完整 8 节点自治模式
+
+```bat
+python bin_to_boot_frames.py Observer_boot.bin --mode classic --target 0xFF --session 0x1234 --session-flags 0x07 --guard 8 --interval 1 -o Observer_8node_1234
+```
+
+此时脚本会额外打印：
+
+```text
+SESSION_BEGIN
+SESSION_CRC32
+SET_GUARD
+ERASE
+WRITE
+WRITE_END
+```
+
+当 `COORD_COMMIT (0x04)` 已启用时，脚本会明确打印：
+
+```text
+VERIFY : omitted (COORD_COMMIT uses distributed VERIFY)
+```
+
+这是正确行为：完整自治模式不能再用 Host Legacy VERIFY 绕过分布式 VERIFY / Prepare / Commit。Host 完成首次广播和 `WRITE_END` 后，由节点自行完成 Coordinator 选举、Missing Repair、分布式校验、Guard 更新/必要时 Rollback，以及最终 Commit。
+
+### 12.7 CAN FD 输出注意事项
+
+正式 CAN FD 可生成：
+
+```bat
+python bin_to_boot_frames.py Observer_boot.bin --mode fd --target 1 -o Observer_fd
+```
+
+输出：
+
+```text
+Observer_fd.canfd.txt
+```
+
+每行是一条通用 CAN FD 描述：
+
+```text
+ID=0x100 FD=1 BRS=1 DLC=64 SEQ=<n> DATA=<64B>
+```
+
+当前脚本源码明确说明：**尚未根据真实 CANPro FD SendList 样本确定 CANPro FD XML 编码**。因此 `.canfd.txt` 用于协议检查或其它 CAN FD 工具；不要直接把它当作已经验证可导入 CANPro 的 FD SendList。当前 CANPro 已验证路径仍是 `.classic.canpro.list`。
+
+### 12.8 使用时最重要的三条规则
+
+1. **APP 每重新编译一次，就重新运行一次脚本，并使用当次生成的 `.list` 和 VERIFY CRC。**
+2. **DATA 发完不代表升级成功：至少要满足 `Missing=0 + CRC32 match + APP vector valid`。**
+3. **脚本只生成 DATA SendList 和控制帧文本；ERASE/WRITE/WRITE_END/VERIFY/JUMP 等控制命令仍需要 Host/CANPro 按顺序发送。**
 
 ## 13. Release 编译
 

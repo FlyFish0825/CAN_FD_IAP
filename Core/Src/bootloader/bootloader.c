@@ -655,6 +655,56 @@ static uint8_t Boot_RuntimeConsumeBootRequest(void)
     return requested;
 }
 
+/*
+ * BKP1R 与 BKP0R 分开使用，避免两种状态互相覆盖：
+ *   BKP0R 表示 APP 已主动请求返回 Bootloader；
+ *   BKP1R 表示刚执行过一次 Trial Jump，正在等待试运行结果。
+ * Boot_CoreInit() 每次只消费并清除一次 BKP1R，后续复位不会重复判定。
+ */
+static void Boot_RuntimeSetTrialPending(void)
+{
+    Boot_RuntimeEnableBackupWrite();
+    TAMP->BKP1R = BOOT_TRIAL_MAGIC;
+    __DSB();
+}
+
+static uint8_t Boot_RuntimeConsumeTrialPending(void)
+{
+    uint8_t pending;
+
+    Boot_RuntimeEnableBackupWrite();
+    pending = (TAMP->BKP1R == BOOT_TRIAL_MAGIC) ? 1U : 0U;
+
+    if (pending != 0U)
+    {
+        TAMP->BKP1R = 0U;
+        __DSB();
+    }
+
+    return pending;
+}
+
+/*
+ * Trial 看门狗：LSI 标称 32 kHz，预分频 /32，重装值 2999。
+ * 标称超时 = (2999 + 1) * 32 / 32000 = 3.0 秒。
+ * 仅在 Trial Jump 前启动；Boot_Task() 和 APP 都不增加周期喂狗路径。
+ */
+static void Boot_RuntimeStartTrialWatchdog(void)
+{
+    IWDG->KR = 0x0000CCCCUL; /* 启动 IWDG。 */
+    IWDG->KR = 0x00005555UL; /* 允许写 PR/RLR。 */
+    IWDG->PR = 3UL;          /* 预分频 /32。 */
+    IWDG->RLR = 2999UL;
+
+    while ((IWDG->SR & (IWDG_SR_PVU | IWDG_SR_RVU)) != 0UL)
+    {
+        /* 等待预分频和重装值在数个 LSI 周期内更新完成。 */
+    }
+
+    IWDG->KR = 0x0000AAAAUL; /* 进入 APP 前重装一次计数器。 */
+    __DSB();
+}
+
 static uint8_t Boot_RuntimeVectorTableValid(void)
 {
     uint32_t msp = *(const volatile uint32_t *)BOOT_APP_START_ADDR;
@@ -701,6 +751,19 @@ static uint8_t Boot_RuntimeValidatePersistedApp(Boot_Config_t *cfg_out)
     Boot_Config_t cfg;
     if (Boot_ConfigLoad(&cfg) == 0U) return 0U;
     if (cfg.app_valid == 0U) return 0U;
+    if (Boot_RuntimeValidateImage(cfg.app_size, cfg.app_crc32) == 0U) return 0U;
+    if (cfg_out != NULL) *cfg_out = cfg;
+    return 1U;
+}
+
+/* Trial 运行期间 metadata 会被故意置为 app_valid=0。
+ * 此处忽略临时失效标志，仅按已保存的长度、CRC 和向量表重新校验镜像。
+ */
+static uint8_t Boot_RuntimeValidateTrialImage(Boot_Config_t *cfg_out)
+{
+    Boot_Config_t cfg;
+
+    if (Boot_ConfigLoad(&cfg) == 0U) return 0U;
     if (Boot_RuntimeValidateImage(cfg.app_size, cfg.app_crc32) == 0U) return 0U;
     if (cfg_out != NULL) *cfg_out = cfg;
     return 1U;
@@ -1914,17 +1977,67 @@ static void Boot_HandleProviderGrant(const Boot_ControlFrame_t *frame)
     (void)Boot_SendResponse(frame->cmd, BOOT_STATUS_WRITE, data);
 }
 
-static void Boot_HandleJumpApp(uint8_t cmd)
+static void Boot_HandleJumpApp(const Boot_ControlFrame_t *frame)
 {
+    uint8_t trial_mode;
+
+    if (frame == NULL) return;
+
+    /* JUMP_APP Byte2/seq：0=原普通跳转，1=一次性 Trial Jump。 */
+    trial_mode = frame->seq;
+    if (trial_mode > 1U)
+    {
+        Boot_SendError(frame->cmd, BOOT_ERR_BAD_STATE);
+        return;
+    }
+
+    if ((trial_mode != 0U) &&
+        (g_session_active != 0U) &&
+        ((g_session_flags & BOOT_SESSION_FLAG_COORD_COMMIT) != 0U))
+    {
+        /* 第一版 Trial 不跨复位保存 Coordinator Session 状态。 */
+        Boot_SendError(frame->cmd, BOOT_ERR_BAD_STATE);
+        return;
+    }
+
     if ((g_app_valid == 0U) || (Boot_RuntimeValidatePersistedApp(&g_config) == 0U))
     {
         g_app_valid = 0U;
-        Boot_SendError(cmd, BOOT_ERR_APP_INVALID);
+        Boot_SendError(frame->cmd, BOOT_ERR_APP_INVALID);
         return;
     }
 
     g_config_valid = 1U;
-    (void)Boot_SendResponse(cmd, BOOT_STATUS_READY, NULL);
+
+    if (trial_mode != 0U)
+    {
+        /* APP 证明能主动返回前，先持久化 app_valid=0，禁止自动再次启动。 */
+        if (Boot_StorageSaveAppMetadata(g_config.app_size, g_config.app_crc32, 0U) == 0U)
+        {
+            Boot_SendError(frame->cmd, BOOT_ERR_CONFIG);
+            return;
+        }
+
+        if (Boot_ConfigLoad(&g_config) == 0U)
+        {
+            g_config_valid = 0U;
+            g_app_valid = 0U;
+            Boot_SendError(frame->cmd, BOOT_ERR_CONFIG);
+            return;
+        }
+
+        g_config_valid = 1U;
+        g_app_valid = 0U;
+        Boot_RuntimeSetTrialPending();
+    }
+
+    (void)Boot_SendResponse(frame->cmd, BOOT_STATUS_READY, NULL);
+
+    if (trial_mode != 0U)
+    {
+        Boot_RuntimeStartTrialWatchdog();
+    }
+
     Boot_FlushTx(20U);
     Boot_RuntimeJumpToApp();
 }
@@ -1961,6 +2074,9 @@ static void Boot_HandleAbort(uint8_t cmd)
 
 static void Boot_CoreInit(uint8_t default_node_id)
 {
+    uint8_t trial_pending;
+    uint8_t app_returned;
+
     memset(&g_config, 0, sizeof(g_config));
     Boot_BitmapClear();
     Boot_CancelAsyncTasks();
@@ -1989,6 +2105,8 @@ static void Boot_CoreInit(uint8_t default_node_id)
     }
 
     g_boot_requested = Boot_RuntimeConsumeBootRequest();
+    app_returned = g_boot_requested;
+    trial_pending = Boot_RuntimeConsumeTrialPending();
     g_guard_active = 0U;
     g_guard_node_id = 0U;
     g_is_guard = 0U;
@@ -2003,6 +2121,45 @@ static void Boot_CoreInit(uint8_t default_node_id)
     g_progress = 0U;
     g_last_error = BOOT_ERR_NONE;
     g_status = BOOT_STATUS_IDLE;
+
+    if (trial_pending != 0U)
+    {
+        /* Trial 结果判定完成后，本次启动始终停留在 Bootloader。 */
+        g_boot_requested = 1U;
+
+        if (app_returned != 0U)
+        {
+            /* APP 已处理 ENTER_BOOT；恢复可信状态前再次完整校验 Flash。 */
+            if (Boot_RuntimeValidateTrialImage(&g_config) == 0U)
+            {
+                g_app_valid = 0U;
+                g_last_error = BOOT_ERR_APP_INVALID;
+                g_status = BOOT_STATUS_ERROR;
+            }
+            else if ((Boot_StorageSaveAppMetadata(g_config.app_size, g_config.app_crc32, 1U) == 0U) ||
+                     (Boot_ConfigLoad(&g_config) == 0U))
+            {
+                g_config_valid = 0U;
+                g_app_valid = 0U;
+                g_last_error = BOOT_ERR_CONFIG;
+                g_status = BOOT_STATUS_ERROR;
+            }
+            else
+            {
+                g_config_valid = 1U;
+                g_app_valid = 1U;
+                g_last_error = BOOT_ERR_NONE;
+                g_status = BOOT_STATUS_IDLE;
+            }
+        }
+        else
+        {
+            /* 没有 BKP0R 请求：APP 未完成主动返回握手。 */
+            g_app_valid = 0U;
+            g_last_error = BOOT_ERR_APP_TRIAL_TIMEOUT;
+            g_status = BOOT_STATUS_ERROR;
+        }
+    }
 }
 
 uint8_t Boot_ShouldJumpApp(void)
@@ -2110,7 +2267,7 @@ static void Boot_ProcessControl(const uint8_t *data, uint8_t len)
         break;
 
     case BOOT_CMD_JUMP_APP:
-        Boot_HandleJumpApp(frame.cmd);
+        Boot_HandleJumpApp(&frame);
         break;
 
     case BOOT_CMD_RESET:

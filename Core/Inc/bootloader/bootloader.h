@@ -82,6 +82,7 @@ extern "C" {
 #define BOOT_CONFIG_MAGIC             0x31474643UL /* CFG1 */
 #define BOOT_CONFIG_VERSION           1U
 #define BOOT_REQUEST_MAGIC            0x544F4F42UL /* BOOT */
+#define BOOT_TRIAL_MAGIC              0x41495254UL /* TRIA：一次性试运行标记 */
 
 #define BOOT_WRITE_REGION_APP         0x00U
 #define BOOT_WRITE_REGION_CONFIG      0x01U
@@ -234,6 +235,7 @@ typedef enum
     BOOT_ERR_COORDINATOR      = 0x13,
     BOOT_ERR_RECOVERY_FAILED  = 0x14,
     BOOT_ERR_COMMIT           = 0x15,
+    BOOT_ERR_APP_TRIAL_TIMEOUT = 0x16,
 } Boot_Error_t;
 
 typedef enum

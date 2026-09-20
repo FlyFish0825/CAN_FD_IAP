@@ -1,6 +1,6 @@
 /*
- * STM32G4 FDCAN adapter example for transport-independent bootloader core.
- * Keep this file outside bootloader/ if you want the core directory to stay clean.
+ * STM32G4 FDCAN 传输适配层：把与硬件有关的 CAN 帧映射为与传输无关的
+ * Boot_Message_t。协议核心只调用本文件导出的回调，不直接依赖 HAL FDCAN。
  */
 #include "bootloader.h"
 #include "fdcan.h"
@@ -9,14 +9,21 @@
 #include "boot_port_can_stm32g4.h"
 
 
+/* 主机下发控制帧使用的标准 CAN ID。 */
 #define BOOT_CAN_CONTROL_RX_ID     0x000U
+/* 固件数据帧的基础 ID；经典 CAN 模式下会扩展为 0x100~0x107。 */
 #define BOOT_CAN_DATA_ID           0x100U
+/* 节点给主机回复时，在基础 ID 上叠加节点号。 */
 #define BOOT_CAN_RESPONSE_BASE_ID  0x500U
+/* 节点间协调控制帧的基础 ID。 */
 #define BOOT_CAN_PEER_BASE_ID      0x600U
+/* FDCAN 硬件发送 FIFO 满载时需要保留的队列深度。 */
 #define BOOT_CAN_TX_FIFO_DEPTH     3U
 
+/** 将逻辑字节数转换为 STM32 HAL 使用的 DLC 编码。 */
 static uint32_t CanBytesToDlc(uint16_t len)
 {
+    /* HAL 定义的 DLC 编码不是简单的字节数，因此逐项映射。 */
     switch (len)
     {
     case 0U:  return FDCAN_DLC_BYTES_0;
@@ -40,25 +47,40 @@ static uint32_t CanBytesToDlc(uint16_t len)
 }
 
 
+/* 经典 CAN 接收分片的临时重组缓冲区，一次容纳一个 64 字节逻辑包。 */
 static uint8_t g_classic_data_buffer[64];
 
+/* 经典 CAN 接收状态：1 表示正在等待后续分片。 */
 static uint8_t g_classic_data_active = 0U;
+/* 下一个允许接收的经典 CAN 分片序号，范围为 1~7。 */
 static uint8_t g_classic_expected_fragment = 0U;
 
 /* Classic-only TX fallback for Provider DATA. One logical 64-byte message is
  * staged here and drained by BootPort_CAN_Task() as IDs 0x100..0x107. */
+/* 经典 CAN 发送分片的临时缓冲区，保存待拆分的完整 DATA 消息。 */
 static uint8_t g_classic_tx_buffer[BOOT_DATA_SIZE];
+/* 经典 CAN 发送是否有待发送的逻辑 DATA 包。 */
 static uint8_t g_classic_tx_active = 0U;
+/* 当前待发送的经典 CAN 分片序号，范围为 0~7。 */
 static uint8_t g_classic_tx_fragment = 0U;
 
 
 
 
-/* Bootloader -> FDCAN. SAME Boot_Message_t used for TX. */
+/**
+ * @brief 将 Bootloader 的逻辑消息编码并放入 FDCAN 发送队列。
+ *
+ * 控制和节点间消息使用 8 字节经典 CAN；固件 DATA 消息优先使用 64
+ * 字节 CAN FD，若外设处于 Classic-only 模式则暂存，交由
+ * BootPort_CAN_Task() 逐帧发送。
+ */
 uint8_t BootPort_CAN_Send(const Boot_Message_t *message, void *user)
 {
+    /* 由调用方传入的 FDCAN 外设句柄，不在本适配层复制或持有。 */
     FDCAN_HandleTypeDef *hfdcan = (FDCAN_HandleTypeDef *)user;
+    /* 每次发送使用独立的 HAL 帧头，避免修改输入逻辑消息。 */
     FDCAN_TxHeaderTypeDef tx = {0};
+    /* 当前逻辑消息对应的 HAL DLC 编码。 */
     uint32_t dlc;
 
     if ((message == NULL) || (hfdcan == NULL)) return 0U;
@@ -113,9 +135,18 @@ uint8_t BootPort_CAN_Send(const Boot_Message_t *message, void *user)
                                            (uint8_t *)message->data) == HAL_OK) ? 1U : 0U;
 }
 
+/**
+ * @brief 发送一个待发的经典 CAN DATA 分片。
+ * @param user FDCAN 句柄指针。
+ *
+ * 该函数是非阻塞的，每次最多向硬件 FIFO 放入一个 8 字节分片，避免在
+ * 主循环中长时间占用 CPU。
+ */
 void BootPort_CAN_Task(void *user)
 {
+    /* 当前服务的 FDCAN 外设句柄。 */
     FDCAN_HandleTypeDef *hfdcan = (FDCAN_HandleTypeDef *)user;
+    /* 经典 CAN 单个 8 字节分片的硬件帧头。 */
     FDCAN_TxHeaderTypeDef tx = {0};
 
     if ((hfdcan == NULL) || (g_classic_tx_active == 0U)) return;
@@ -143,9 +174,16 @@ void BootPort_CAN_Task(void *user)
     }
 }
 
+/**
+ * @brief 在跳转或复位前等待底层发送工作完成。
+ * @param user       FDCAN 句柄指针。
+ * @param timeout_ms 最大等待时间，防止异常总线状态导致永久阻塞。
+ */
 void BootPort_CAN_Flush(void *user, uint32_t timeout_ms)
 {
+    /* 当前服务的 FDCAN 外设句柄。 */
     FDCAN_HandleTypeDef *hfdcan = (FDCAN_HandleTypeDef *)user;
+    /* 记录等待起点，用于限制总等待时长。 */
     uint32_t start = HAL_GetTick();
     if (hfdcan == NULL) return;
 
@@ -161,12 +199,22 @@ void BootPort_CAN_Flush(void *user, uint32_t timeout_ms)
 
 
 
+/**
+ * @brief 按严格序号重组一个经典 CAN 固件 DATA 逻辑包。
+ * @param can_id 当前分片的标准 CAN ID（0x100~0x107）。
+ * @param data   当前分片的 8 字节数据。
+ *
+ * 任意分片丢失或乱序都会丢弃当前重组结果，等待下一个分片 0 开始新的
+ * 逻辑包；上层通过序号 Bitmap 发现丢包并安排补发。
+ */
 static void BootPort_CAN_ProcessClassicDataFragment(
     uint32_t can_id,
     const uint8_t data[8])
 {
+    /* 重组完成后投递给协议核心的逻辑消息对象。 */
     Boot_Message_t message;
 
+    /* 当前分片在 0x100~0x107 序列中的序号。 */
     uint8_t fragment;
 
     if ((can_id < 0x100U) || (can_id > 0x107U))
@@ -250,15 +298,21 @@ static void BootPort_CAN_ProcessClassicDataFragment(
 
 
 
-/* FDCAN -> Bootloader. The ISR only maps a hardware frame into Boot_Message_t
- * and queues it through Boot_Input(); Flash/protocol work stays in Boot_Task().
+/**
+ * @brief 将 FIFO0 中的硬件帧转换为逻辑消息并投递给 Boot_Input()。
+ *
+ * 回调运行在中断上下文，只做取帧、校验 ID/格式和入队，不执行 Flash
+ * 擦写、CRC 或其它耗时协议处理；这些工作统一由 Boot_Task() 完成。
  */
- void BootPort_CAN_RxFifo0Callback(
+void BootPort_CAN_RxFifo0Callback(
     FDCAN_HandleTypeDef *hfdcan,
     uint32_t RxFifo0ITs)
 {
+    /* HAL 填充的 FDCAN 接收帧头，包含 ID、格式和数据长度。 */
     FDCAN_RxHeaderTypeDef rx_header;
+    /* HAL 接收缓冲区，CAN FD 最大承载 64 字节。 */
     uint8_t data[64];
+    /* 经过硬件帧校验后送入协议队列的统一消息对象。 */
     Boot_Message_t message;
  
 
@@ -307,6 +361,7 @@ static void BootPort_CAN_ProcessClassicDataFragment(
             (rx_header.Identifier <= (BOOT_CAN_PEER_BASE_ID + BOOT_MAX_NODE_NUM)) &&
             (rx_header.DataLength == FDCAN_DLC_BYTES_8))
         {
+            /* ID 中的偏移量就是发送端声明的源节点号。 */
             uint8_t source = (uint8_t)(rx_header.Identifier - BOOT_CAN_PEER_BASE_ID);
             if (data[2] == source)
             {
@@ -353,7 +408,14 @@ static void BootPort_CAN_ProcessClassicDataFragment(
         }
     }
 }
-void BootPort_CAN_Filter_Init() {
+/**
+ * @brief 安装 Bootloader 使用的 FDCAN 标准帧过滤规则。
+ *
+ * 过滤器将控制帧、CAN FD DATA 帧、节点间控制帧以及经典 CAN 分片导入
+ * FIFO0，实际帧格式和长度仍在接收回调中再次校验。
+ */
+void BootPort_CAN_Filter_Init(void) {
+  /* 复用同一个过滤器对象，依次安装不同 ID 区间的规则。 */
   FDCAN_FilterTypeDef filter = {0};
 
   /* 0x000：控制面 */
@@ -395,4 +457,3 @@ void BootPort_CAN_Filter_Init() {
     Error_Handler();
 }
 }
-

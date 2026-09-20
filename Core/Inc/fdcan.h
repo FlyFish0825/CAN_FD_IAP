@@ -32,6 +32,7 @@ extern "C" {
 
 /* USER CODE END Includes */
 
+/* FDCAN1 全局句柄，由 fdcan.c 定义并供 Bootloader 适配层使用。 */
 extern FDCAN_HandleTypeDef hfdcan1;
 
 /* USER CODE BEGIN Private defines */

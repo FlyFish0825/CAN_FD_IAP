@@ -103,3 +103,15 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 
     # Add user defined libraries
 )
+
+# 每个晶振预设在各自构建目录生成可直接烧录的裸 BIN，避免误用旧文件。
+add_custom_command(
+    TARGET ${CMAKE_PROJECT_NAME}
+    POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY}
+            -O binary
+            $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
+            "${CMAKE_CURRENT_BINARY_DIR}/${CMAKE_PROJECT_NAME}.bin"
+    COMMENT "Generating ${CMAKE_PROJECT_NAME}.bin"
+    VERBATIM
+)

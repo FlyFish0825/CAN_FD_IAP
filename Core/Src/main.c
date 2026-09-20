@@ -22,6 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "board_config.h"
 #include "bootloader.h"
 #include "boot_port_can_stm32g4.h"
 /* USER CODE END Includes */
@@ -49,6 +50,7 @@
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
+/* 配置 HSE、PLL、SYSCLK、AHB 和 APB 时钟树。 */
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 
@@ -65,6 +67,7 @@ void SystemClock_Config(void);
   */
 int main(void)
 {
+  /* 固件主入口：初始化 HAL、时钟、FDCAN 和 Bootloader，然后持续轮询任务。 */
 
   /* USER CODE BEGIN 1 */
 
@@ -95,11 +98,11 @@ int main(void)
   BootPort_CAN_Filter_Init();
 
   Boot_Init(1,BootPort_CAN_Send,BootPort_CAN_Flush,&hfdcan1);
-  //判断是否进入APP
+  /* 根据持久化元数据判断是否可以安全跳转到 APP。 */
   if (Boot_ShouldJumpApp() != 0U) {
     Boot_JumpApp();
   }
-  // 启动FDCAN
+  /* 启动 FDCAN 外设并打开 FIFO0 新消息中断。 */
   if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK) {
     Error_Handler();
   }
@@ -129,7 +132,9 @@ int main(void)
   */
 void SystemClock_Config(void)
 {
+  /* 振荡器和 PLL 参数结构体，按板卡 HSE 频率选择 PLLN。 */
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
+  /* CPU、AHB、APB 总线时钟分频结构体。 */
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
   /** Configure the main internal regulator output voltage
@@ -143,8 +148,18 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV6;
-  RCC_OscInitStruct.PLL.PLLN = 85;
+  /*
+   * 24 MHz 与 16 MHz 晶振统一生成精确的 168 MHz SYSCLK/FDCAN 时钟：
+   * 24 / 2 * 28 / 2 = 168 MHz；16 / 2 * 42 / 2 = 168 MHz。
+   */
+  RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV2;
+#if BOARD_HSE_HZ == 24000000UL
+  RCC_OscInitStruct.PLL.PLLN = 28;
+#elif BOARD_HSE_HZ == 16000000UL
+  RCC_OscInitStruct.PLL.PLLN = 42;
+#else
+#error "Unsupported BOARD_HSE_HZ: use 24000000 or 16000000"
+#endif
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
   RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
@@ -178,6 +193,7 @@ void SystemClock_Config(void)
   */
 void Error_Handler(void)
 {
+  /* HAL 初始化失败时关闭中断并停机，防止在未配置硬件上继续运行。 */
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
@@ -196,6 +212,7 @@ void Error_Handler(void)
   */
 void assert_failed(uint8_t *file, uint32_t line)
 {
+  /* 参数断言失败入口；当前版本保留 file/line 供调试器查看。 */
   /* USER CODE BEGIN 6 */
   /* User can add his own implementation to report the file name and line number,
      ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */

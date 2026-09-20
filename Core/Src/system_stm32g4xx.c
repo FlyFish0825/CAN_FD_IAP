@@ -76,6 +76,7 @@
   */
 
 #include "stm32g4xx.h"
+#include "board_config.h"
 
 #if !defined  (HSE_VALUE)
   #define HSE_VALUE     24000000U /*!< Value of the External oscillator in Hz */
@@ -149,9 +150,12 @@
                is no need to call the 2 first functions listed above, since SystemCoreClock
                variable is updated automatically.
   */
+  /* CMSIS 维护的 HCLK 频率缓存，复位后先取 HSI 默认值。 */
   uint32_t SystemCoreClock = HSI_VALUE;
 
+  /* AHB 分频寄存器编码到右移位数的查找表。 */
   const uint8_t AHBPrescTable[16] = {0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 1U, 2U, 3U, 4U, 6U, 7U, 8U, 9U};
+  /* APB 分频寄存器编码到右移位数的查找表。 */
   const uint8_t APBPrescTable[8] =  {0U, 0U, 0U, 0U, 1U, 2U, 3U, 4U};
 
 /**
@@ -178,6 +182,7 @@
 
 void SystemInit(void)
 {
+  /* 复位后最早执行的系统初始化：开启 FPU，并按配置定位向量表。 */
   /* FPU settings ------------------------------------------------------------*/
   #if (__FPU_PRESENT == 1) && (__FPU_USED == 1)
     SCB->CPACR |= ((3UL << (10*2))|(3UL << (11*2)));  /* set CP10 and CP11 Full Access */
@@ -227,6 +232,8 @@ void SystemInit(void)
   */
 void SystemCoreClockUpdate(void)
 {
+  /* 根据 RCC 当前寄存器重新计算 HCLK，供 HAL/SysTick 使用。 */
+  /* tmp 为 AHB 分频右移量，其余变量保存 PLL 计算中间值。 */
   uint32_t tmp, pllvco, pllr, pllsource, pllm;
 
   /* Get SYSCLK source -------------------------------------------------------*/
@@ -281,5 +288,3 @@ void SystemCoreClockUpdate(void)
 /**
   * @}
   */
-
-

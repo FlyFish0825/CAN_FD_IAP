@@ -9,7 +9,7 @@ V1.3 是基于 V1.2 协议的 **Flash 体积优化版本**。命令、CAN ID、C
 - 纯 C 固件不再链接无用的 GCC CRT/C++ 构造器启动框架；
 - Bootloader 中断向量表裁剪到当前最高使用的 FDCAN1 IT0；
 - FDCAN 接收中断只处理 FIFO0 新消息，不再链接 HAL 通用中断分派器；
-- Release Flash 从 19,324 B 降到 16,488 B，20 KiB 分区剩余 3,992 B。
+- 历史精简 Release 曾将 Flash 从 19,324 B 降到 16,488 B；当前工作树 Release 为 17,976 B，20 KiB 分区剩余 2,504 B。
 
 V1.2 在 V1.1 的广播升级、Bitmap、Missing、Provider、Session、Coordinator 基础上补齐：
 
@@ -21,6 +21,31 @@ V1.2 在 V1.1 的广播升级、Bitmap、Missing、Provider、Session、Coordina
 - Prepare / Commit 协调提交；
 - Classic CAN Provider 64B→8×8B 分片发送；
 - CAN FD 原生 64B DATA 保持不变。
+
+## 文档索引
+
+根目录 README 只保留项目总览、协议摘要和快速入口；详细资料统一放在二级目录 `docs/`，按使用场景查阅：
+
+| 文档 | 用途 |
+|---|---|
+| [`docs/STM32G431 Bootloader 协议与使用说明.md`](docs/STM32G431%20Bootloader%20协议与使用说明.md) | 完整协议、Flash 布局、升级状态机和现场使用说明 |
+| [`docs/COMMAND_TEST_GUIDE.md`](docs/COMMAND_TEST_GUIDE.md) | CANPro 控制帧、响应帧和逐命令测试步骤 |
+| [`docs/VALIDATION.md`](docs/VALIDATION.md) | 构建、静态检查和端到端验证记录 |
+| [`docs/HOST_WINDOW_FLOW_CONTROL_REPORT.md`](docs/HOST_WINDOW_FLOW_CONTROL_REPORT.md) | Host 窗口流控设计、边界条件和验证结论 |
+| [`docs/CODEX_APP_TRIAL_JUMP_TASK.md`](docs/CODEX_APP_TRIAL_JUMP_TASK.md) | APP 试运行跳转任务记录与验收项 |
+
+源码入口：`Core/Inc/bootloader/bootloader.h`（协议定义）、`Core/Src/bootloader/bootloader.c`（核心状态机）、`Core/Src/bootloader/boot_port_can_stm32g4.c`（FDCAN 适配）。构建配置入口：`CMakePresets.json`。
+
+注释范围：本项目维护的协议核心、FDCAN 适配层、板级初始化、系统调用和配置头文件中的函数、变量、宏和结构体均使用中文说明；`Drivers/` 下的 STM32 HAL/CMSIS 第三方代码以及 CubeMX 生成的纯模板段保持原厂内容，不重复改写。新增或修改协议字段时，应同步补充定义、状态机副作用、取值范围和持久化格式说明。
+
+快速构建与验证：
+
+```powershell
+cmake --preset Release
+cmake --build --preset Release
+```
+
+构建记录、静态检查和端到端检查项见 [`docs/VALIDATION.md`](docs/VALIDATION.md)；CANPro 逐命令测试见 [`docs/COMMAND_TEST_GUIDE.md`](docs/COMMAND_TEST_GUIDE.md)。
 
 > `Session ID = 0` 为 Legacy 兼容模式；不启用自治流程时，原来的单节点/CANPro 手动 ERASE→WRITE→DATA→WRITE_END→VERIFY→JUMP 流程仍可使用。
 
@@ -42,9 +67,17 @@ Bootloader 和 APP 不会同时执行，因此二者可以使用同一整块 SRA
 
 把函数放到 SRAM 执行通常不会减少 Flash，因为函数初始机器码仍需保存在 Flash 再复制到 RAM。当前 V1.3 使用 SRAM 的重点是允许队列和工作缓冲保持较大，而不为节省 RAM 压缩协议状态。
 
+### 晶振与 CAN 位速率
+
+- 支持 24 MHz 与 16 MHz 两种板载晶振构建；默认预设为 24 MHz。
+- 两种构建均把 SYSCLK/FDCAN 内核时钟配置为精确的 168 MHz。
+- CAN 仲裁段为 1 Mbit/s，CAN FD+BRS 数据段为 8 Mbit/s。
+- 16 MHz 板先把 `Core/Inc/board_config.h` 中的 `BOARD_HSE_HZ` 改为 `16000000UL`，
+  再使用普通 `Debug` 或 `Release` 预设编译；固件不能在不同晶振板之间混刷。
+
 ### Bootloader → APP 安全跳转
 
-Bootloader 与 APP 可以使用不同 PLL/系统时钟配置。当前实机验证中，Bootloader 为 170 MHz，而 `Observer_Motor` APP 为 168 MHz；如果直接跳转，APP 的 `HAL_RCC_OscConfig()` 会因为 PLL 仍是当前 SYSCLK 且参数不同而返回 `HAL_ERROR`。
+Bootloader 与 APP 当前都使用 168 MHz，但仍可能来自不同晶振或不同 PLL 配置；如果直接跳转，APP 的 `HAL_RCC_OscConfig()` 仍可能因为 PLL 正在作为当前 SYSCLK 而返回 `HAL_ERROR`。
 
 因此 `Boot_RuntimeJumpToApp()` 在设置 MSP/VTOR 和执行 APP Reset_Handler 前，会先执行：
 
@@ -161,7 +194,7 @@ Byte8~63    Firmware Payload = 56 Byte
 地址=`0x08005000 + Sequence*56`。最后一包补 `0xFF`，CRC32 只覆盖真实 firmware_size。
 ## 6. 命令分类
 
-为便于 CANPro 调试和源码定位，V1.2 不再把所有命令只按数值排列，而是按用途分为 7 类。完整逐命令测试帧、可能接收、失败响应和判断方法见 [`COMMAND_TEST_GUIDE.md`](COMMAND_TEST_GUIDE.md)。
+为便于 CANPro 调试和源码定位，V1.2 不再把所有命令只按数值排列，而是按用途分为 7 类。完整逐命令测试帧、可能接收、失败响应和判断方法见 [`COMMAND_TEST_GUIDE.md`](docs/COMMAND_TEST_GUIDE.md)。
 
 ### A. 基础查询 / Boot 控制
 
@@ -479,7 +512,7 @@ Classic 模式严格拆为：
 8. VERIFY 成功后可选用 `READ` 抽查 APP 向量表；
 9. 最后发送 `JUMP_APP`，观察节点停止响应 Bootloader 命令并由 APP 正常运行。
 
-详细的 8 字节控制帧、状态值和错误响应见 [`COMMAND_TEST_GUIDE.md`](COMMAND_TEST_GUIDE.md)。
+详细的 8 字节控制帧、状态值和错误响应见 [`COMMAND_TEST_GUIDE.md`](docs/COMMAND_TEST_GUIDE.md)。
 
 ### 12.5 下载校验：不要只看“CAN 发完了”
 
@@ -589,11 +622,11 @@ ID=0x100 FD=1 BRS=1 DLC=64 SEQ=<n> DATA=<64B>
 cmake --build --preset Release
 ```
 
-当前 V1.3 Release 已 clean build 通过。Linker 已锁定 `FLASH ORIGIN=0x08000000, LENGTH=20K`，超过 `0x08004FFF` 会直接链接失败。
+当前工作树 V1.3 Release 已 clean build 通过。Linker 已锁定 `FLASH ORIGIN=0x08000000, LENGTH=20K`，超过 `0x08004FFF` 会直接链接失败。
 
 ```text
-FLASH 16488 B / 20 KiB  80.51%  （剩余 3992 B）
-RAM    7448 B / 32 KiB  22.73%
+FLASH 17976 B / 20 KiB  87.77%  （剩余 2504 B）
+RAM    17904 B / 32 KiB  54.64%
 0 compiler/linker error
 ```
 
@@ -604,7 +637,8 @@ RAM    7448 B / 32 KiB  22.73%
 | V1.2 安全 Jump 完成后 | 19,324 B | — |
 | 删除未使用 UART | 17,688 B | 1,636 B |
 | Release 细化优化、移除空 GPIO 初始化 | 17,344 B | 1,980 B |
-| V1.3 精简启动、向量表和 FDCAN ISR | **16,488 B** | **2,836 B** |
+| V1.3 历史精简启动、向量表和 FDCAN ISR | 16,488 B | 2,836 B |
+| 当前工作树 Release | **17,976 B** | 1,348 B |
 
 Flash 数值按 ELF 的 `text + data` 统计，不是 `.elf` 文件在电脑上的文件大小。必须使用 Release；Debug 的 `-O0/-g3` 用于调试，不满足 20 KiB 体积约束。
 

@@ -28,7 +28,7 @@
 /**
  * Pointer to the current high watermark of the heap usage
  */
-static uint8_t *__sbrk_heap_end = NULL;
+static uint8_t *__sbrk_heap_end = NULL; /* 当前堆顶，首次分配时从链接器 _end 开始。 */
 
 /**
  * @brief _sbrk() allocates memory to the newlib heap and is used by malloc
@@ -53,12 +53,14 @@ static uint8_t *__sbrk_heap_end = NULL;
  */
 void *_sbrk(ptrdiff_t incr)
 {
+  /* 为 newlib 提供受最小栈空间保护的线性堆分配。 */
   extern uint8_t _end; /* Symbol defined in the linker script */
   extern uint8_t _estack; /* Symbol defined in the linker script */
   extern uint32_t _Min_Stack_Size; /* Symbol defined in the linker script */
+  /* 堆不能越过预留的 MSP 栈底。 */
   const uint32_t stack_limit = (uint32_t)&_estack - (uint32_t)&_Min_Stack_Size;
-  const uint8_t *max_heap = (uint8_t *)stack_limit;
-  uint8_t *prev_heap_end;
+  const uint8_t *max_heap = (uint8_t *)stack_limit; /* 允许的堆上界。 */
+  uint8_t *prev_heap_end; /* 返回给调用者的旧堆顶。 */
 
   /* Initialize heap end at first call */
   if (NULL == __sbrk_heap_end)

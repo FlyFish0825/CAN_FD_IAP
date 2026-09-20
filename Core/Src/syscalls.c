@@ -36,20 +36,23 @@ extern int __io_putchar(int ch) __attribute__((weak));
 extern int __io_getchar(void) __attribute__((weak));
 
 
-char *__env[1] = { 0 };
-char **environ = __env;
+char *__env[1] = { 0 }; /* newlib 使用的最小环境变量表。 */
+char **environ = __env; /* C 运行库公开的环境变量指针。 */
 
 
 /* Functions */
+/* 初始化半主机监视器句柄；裸机版本不需要实际操作。 */
 void initialise_monitor_handles()
 {
 }
 
+/* 返回固定进程号，满足 newlib 系统调用接口。 */
 int _getpid(void)
 {
   return 1;
 }
 
+/* 裸机不支持进程信号，统一返回无效参数错误。 */
 int _kill(int pid, int sig)
 {
   (void)pid;
@@ -58,12 +61,14 @@ int _kill(int pid, int sig)
   return -1;
 }
 
+/* 终止 C 运行库环境；嵌入式系统停在此处等待复位或调试。 */
 void _exit (int status)
 {
   _kill(status, -1);
   while (1) {}    /* Make sure we hang here */
 }
 
+/* 从弱符号 __io_getchar 逐字节读取，供 scanf 等接口使用。 */
 __attribute__((weak)) int _read(int file, char *ptr, int len)
 {
   (void)file;
@@ -77,6 +82,7 @@ __attribute__((weak)) int _read(int file, char *ptr, int len)
   return len;
 }
 
+/* 向弱符号 __io_putchar 逐字节写出，供 printf 等接口使用。 */
 __attribute__((weak)) int _write(int file, char *ptr, int len)
 {
   (void)file;
@@ -89,6 +95,7 @@ __attribute__((weak)) int _write(int file, char *ptr, int len)
   return len;
 }
 
+/* 裸机没有文件描述符，关闭操作固定失败。 */
 int _close(int file)
 {
   (void)file;
@@ -96,6 +103,7 @@ int _close(int file)
 }
 
 
+/* 返回标准输出为字符设备，满足 printf 的流属性查询。 */
 int _fstat(int file, struct stat *st)
 {
   (void)file;
@@ -103,12 +111,14 @@ int _fstat(int file, struct stat *st)
   return 0;
 }
 
+/* 判断文件描述符是否为终端；当前所有描述符均按终端处理。 */
 int _isatty(int file)
 {
   (void)file;
   return 1;
 }
 
+/* 裸机不支持文件定位，固定返回错误。 */
 int _lseek(int file, int ptr, int dir)
 {
   (void)file;
@@ -117,6 +127,7 @@ int _lseek(int file, int ptr, int dir)
   return 0;
 }
 
+/* 裸机不支持路径打开，固定返回错误。 */
 int _open(char *path, int flags, ...)
 {
   (void)path;
@@ -125,6 +136,7 @@ int _open(char *path, int flags, ...)
   return -1;
 }
 
+/* 裸机无子进程，等待操作固定失败。 */
 int _wait(int *status)
 {
   (void)status;
@@ -132,6 +144,7 @@ int _wait(int *status)
   return -1;
 }
 
+/* 裸机无文件系统，删除操作固定失败。 */
 int _unlink(char *name)
 {
   (void)name;
@@ -139,12 +152,14 @@ int _unlink(char *name)
   return -1;
 }
 
+/* 裸机无进程计时统计，返回零值。 */
 clock_t _times(struct tms *buf)
 {
   (void)buf;
   return -1;
 }
 
+/* 裸机无文件状态信息，固定返回错误。 */
 int _stat(const char *file, struct stat *st)
 {
   (void)file;
@@ -152,6 +167,7 @@ int _stat(const char *file, struct stat *st)
   return 0;
 }
 
+/* 裸机无文件链接操作，固定返回错误。 */
 int _link(char *old, char *new)
 {
   (void)old;
@@ -160,12 +176,14 @@ int _link(char *old, char *new)
   return -1;
 }
 
+/* 裸机不创建子进程，固定返回错误。 */
 int _fork(void)
 {
   errno = EAGAIN;
   return -1;
 }
 
+/* 裸机不加载新进程映像，固定返回错误。 */
 int _execve(char *name, char **argv, char **env)
 {
   (void)name;
@@ -185,6 +203,7 @@ int _execve(char *name, char **argv, char **env)
  * @param file FILE stream pointer (ignored).
  * @retval int The character written.
  */
+/* FILE 流底层单字符输出适配器。 */
 static int starm_putc(char c, FILE *file)
 {
 	(void) file;
@@ -198,6 +217,7 @@ static int starm_putc(char c, FILE *file)
  * @param file FILE stream pointer (ignored).
  * @retval int The character read, cast to an unsigned char then int.
  */
+/* FILE 流底层单字符输入适配器。 */
 static int starm_getc(FILE *file)
 {
 	unsigned char c;

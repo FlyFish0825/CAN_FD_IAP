@@ -25,8 +25,9 @@
 /* USER CODE END 0 */
 
 FDCAN_HandleTypeDef hfdcan1;
+/* FDCAN1 HAL 句柄，供主循环、发送适配层和中断回调共享。 */
 
-/* FDCAN1 init function */
+/* 初始化 FDCAN1 的位时序、帧格式、过滤器数量和发送队列。 */
 void MX_FDCAN1_Init(void)
 {
 
@@ -39,20 +40,20 @@ void MX_FDCAN1_Init(void)
   /* USER CODE END FDCAN1_Init 1 */
   hfdcan1.Instance = FDCAN1;
   hfdcan1.Init.ClockDivider = FDCAN_CLOCK_DIV1;
-  /* CAN FD 位时序：仲裁段 500 kbit/s，BRS 数据段 5 Mbit/s。 */
+  /* 168 MHz FDCAN 内核时钟：仲裁段 1 Mbit/s，BRS 数据段 8 Mbit/s。 */
   hfdcan1.Init.FrameFormat = FDCAN_FRAME_FD_BRS;
   hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
   hfdcan1.Init.AutoRetransmission = DISABLE;
   hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
-  hfdcan1.Init.NominalPrescaler = 17;
-  hfdcan1.Init.NominalSyncJumpWidth = 1;
-  hfdcan1.Init.NominalTimeSeg1 = 14;
-  hfdcan1.Init.NominalTimeSeg2 = 5;
-  hfdcan1.Init.DataPrescaler = 2;
-  hfdcan1.Init.DataSyncJumpWidth = 3;
-  hfdcan1.Init.DataTimeSeg1 = 13;
-  hfdcan1.Init.DataTimeSeg2 = 3;
+  hfdcan1.Init.NominalPrescaler = 3;
+  hfdcan1.Init.NominalSyncJumpWidth = 4;
+  hfdcan1.Init.NominalTimeSeg1 = 48;
+  hfdcan1.Init.NominalTimeSeg2 = 7;
+  hfdcan1.Init.DataPrescaler = 1;
+  hfdcan1.Init.DataSyncJumpWidth = 4;
+  hfdcan1.Init.DataTimeSeg1 = 16;
+  hfdcan1.Init.DataTimeSeg2 = 4;
   /* 为 Bootloader 命令保留 3 个标准 ID 过滤器（FilterIndex = 0）。 */
   hfdcan1.Init.StdFiltersNbr = 3;
   hfdcan1.Init.ExtFiltersNbr = 0;
@@ -70,7 +71,10 @@ void MX_FDCAN1_Init(void)
 void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* fdcanHandle)
 {
 
+  /* FDCAN 外设时钟、引脚复用、收发器待机脚和中断的底层配置。 */
+  /* 形参指向 HAL 当前正在初始化的 FDCAN 句柄。 */
   GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* FDCAN 内核时钟选择结构体。 */
   RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
   if(fdcanHandle->Instance==FDCAN1)
   {
@@ -115,6 +119,7 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* fdcanHandle)
 
 void HAL_FDCAN_MspDeInit(FDCAN_HandleTypeDef* fdcanHandle)
 {
+  /* 释放 FDCAN1 的中断、GPIO 复用和外设时钟资源。 */
 
   if(fdcanHandle->Instance==FDCAN1)
   {

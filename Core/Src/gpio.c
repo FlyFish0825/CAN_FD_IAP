@@ -41,6 +41,7 @@
 */
 void MX_GPIO_Init(void)
 {
+  /* 只打开仍被工程使用的 GPIO 端口时钟；具体 FDCAN 引脚由 MSP 配置。 */
 
   /* GPIO Ports Clock Enable */
   __HAL_RCC_GPIOF_CLK_ENABLE();

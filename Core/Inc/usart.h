@@ -32,6 +32,7 @@ extern "C" {
 
 /* USER CODE END Includes */
 
+/* USART2 全局句柄，供 HAL MSP 和调试输出使用。 */
 extern UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN Private defines */

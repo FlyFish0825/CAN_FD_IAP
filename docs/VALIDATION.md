@@ -8,14 +8,17 @@
 cmake --build --preset Release --clean-first
 ```
 
-V1.3 完成 UART、启动框架、向量表和 FDCAN ISR 体积优化后的 clean build 结果：
+当前工作树（2026-09-20）完成 clean build 的结果：
 
 ```text
-RAM    7448 B / 32 KiB  22.73%
-FLASH 16488 B / 20 KiB  80.51%
-剩余   3992 B
+RAM    17904 B / 32 KiB  54.64%
+FLASH 17976 B / 20 KiB  87.77%
+剩余   2504 B
 0 compiler/linker error
 ```
+
+此前 V1.3 精简启动框架、向量表和 FDCAN ISR 的历史构建记录为
+`FLASH 16488 B / RAM 7448 B`；该数字保留在下表用于对比，不代表当前工作树产物。
 
 Linker 固定 `FLASH ORIGIN=0x08000000, LENGTH=20K`，Bootloader 超过 `0x08004FFF` 会直接链接失败。
 
@@ -26,7 +29,8 @@ Linker 固定 `FLASH ORIGIN=0x08000000, LENGTH=20K`，Bootloader 超过 `0x08004
 | V1.2 安全 Jump 完成后 | 19,324 B |
 | 删除 UART 后 | 17,688 B |
 | Release 编译细化后 | 17,344 B |
-| V1.3 最终 clean build | **16,488 B** |
+| V1.3 历史精简构建 | 16,488 B |
+| 当前工作树 clean build | **17,976 B** |
 
 V1.3 静态检查结果：
 
@@ -39,6 +43,15 @@ V1.3 静态检查结果：
 - 协议命令、CRC、Config/Metadata 布局及 APP 起始地址均未改变。
 
 ## 2. 协议 / 工具验证
+
+根目录帧生成脚本已通过 Python 语法检查：
+
+```text
+python -m py_compile bin_to_boot_frames.py  -> PASS
+```
+
+当前 CMake 工程未注册 CTest 测试项，`ctest --test-dir build/Release --output-on-failure`
+返回 `No tests were found`；这不等同于端到端 CAN 总线实测通过。
 
 - CRC8/ATM(`"123456789"`) = `0xF4`；
 - CRC32/MPEG-2(`"123456789"`) = `0x0376E6E7`；

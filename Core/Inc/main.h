@@ -50,6 +50,7 @@ extern "C" {
 /* USER CODE END EM */
 
 /* Exported functions prototypes ---------------------------------------------*/
+/* HAL 或时钟初始化失败时进入的统一错误处理函数。 */
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */

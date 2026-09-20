@@ -32,14 +32,15 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-WRITE_DATA_CMD = 0x01
-DATA_BYTES_PER_PACKET = 56
-LOGICAL_PACKET_SIZE = 64
-FRAGMENT_SIZE = 8
-CAN_DATA_BASE_ID = 0x100
+WRITE_DATA_CMD = 0x01  # Bootloader DATA 写入命令码。
+DATA_BYTES_PER_PACKET = 56  # 每个逻辑 DATA 包承载的固件字节数。
+LOGICAL_PACKET_SIZE = 64  # CAN FD 逻辑 DATA 包总长度。
+FRAGMENT_SIZE = 8  # Classic CAN 单个分片长度。
+CAN_DATA_BASE_ID = 0x100  # 固件 DATA/分片使用的基础标准 ID。
 
 
 def crc8_atm(data: bytes) -> int:
+    """计算控制帧使用的 CRC8/ATM（多项式 0x07）。"""
     crc = 0
     for value in data:
         crc ^= value
@@ -49,6 +50,7 @@ def crc8_atm(data: bytes) -> int:
 
 
 def crc32_mpeg2_bytes(data: bytes) -> int:
+    """计算 APP 镜像使用的 CRC32/MPEG-2（无反射）。"""
     crc = 0xFFFFFFFF
     for value in data:
         crc ^= value << 24
@@ -58,11 +60,13 @@ def crc32_mpeg2_bytes(data: bytes) -> int:
 
 
 def control_frame(target: int, cmd: int, byte2: int = 0, param4: bytes = b"\x00\x00\x00\x00") -> bytes:
+    """按 8 字节控制帧格式组帧并追加 CRC8。"""
     raw7 = bytes([target & 0xFF, cmd & 0xFF, byte2 & 0xFF]) + param4
     return raw7 + bytes([crc8_atm(raw7)])
 
 
 def build_data_packet(target: int, sequence: int, firmware_chunk: bytes, session: int = 0) -> bytes:
+    """构造一个带目标、序号、Session 和 56 字节固件载荷的逻辑 DATA 包。"""
     if len(firmware_chunk) > DATA_BYTES_PER_PACKET:
         raise ValueError("firmware chunk too large")
 
@@ -85,7 +89,8 @@ def build_data_packet(target: int, sequence: int, firmware_chunk: bytes, session
 # ---------------- Classic CANPro XML ----------------
 
 def canpro_classic_obj(can_id: int, payload: bytes) -> str:
-    """
+    """把 8 字节 Classic CAN 数据编码为 CANPro obj 十六进制字段。
+
     Exact Classic CANPro obj format observed from user's SendList:
       4B CAN ID little-endian
       8B zero metadata
@@ -107,6 +112,7 @@ def canpro_classic_obj(can_id: int, payload: bytes) -> str:
 
 
 def classic_tag(can_id: int, payload: bytes, interval_ms: int) -> str:
+    """生成一个 CANPro Classic CAN XML tag。"""
     return (
         f'    <tagSendUint iInterval="{interval_ms}" iTimes="1" len="1" '
         f'bIncreaseID="0" bIncreaseData="0" '
@@ -115,6 +121,7 @@ def classic_tag(can_id: int, payload: bytes, interval_ms: int) -> str:
 
 
 def emit_classic_canpro(fw: bytes, target: int, interval_ms: int, out: Path, session: int = 0) -> None:
+    """将固件拆成逻辑包和 8 个 Classic CAN 分片并写出 SendList。"""
     packet_count = (len(fw) + DATA_BYTES_PER_PACKET - 1) // DATA_BYTES_PER_PACKET
 
     lines = ['<SendList m_dwCycles="1">']
@@ -135,7 +142,8 @@ def emit_classic_canpro(fw: bytes, target: int, interval_ms: int, out: Path, ses
 # ---------------- Native CAN FD generic list ----------------
 
 def emit_fd_text(fw: bytes, target: int, out: Path, session: int = 0) -> None:
-    """
+    """输出通用 CAN FD 文本列表，避免假定尚未确认的 CANPro FD XML 编码。
+
     Generic text list because the exact CANPro FD XML encoding has not been
     established from a real CANPro FD SendList sample.
 
@@ -157,6 +165,7 @@ def emit_fd_text(fw: bytes, target: int, out: Path, session: int = 0) -> None:
 
 
 def print_control_frames(fw: bytes, target: int, session: int = 0, session_flags: int = 0x01, guard: int = 0) -> None:
+    """打印本次镜像对应的 SESSION/ERASE/WRITE/VERIFY 等控制帧。"""
     size = len(fw)
     fw_crc = crc32_mpeg2_bytes(fw)
 
@@ -196,6 +205,7 @@ def print_control_frames(fw: bytes, target: int, session: int = 0, session_flags
 
 
 def main() -> None:
+    """解析命令行参数，读取 BIN 并生成 Classic/FD 输出文件。"""
     ap = argparse.ArgumentParser()
     ap.add_argument("bin", type=Path, help="APP .bin file")
     ap.add_argument("--mode", choices=["classic", "fd", "both"], default="both")

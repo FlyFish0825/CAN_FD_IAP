@@ -62,6 +62,7 @@
   */
 void HAL_MspInit(void)
 {
+  /* 初始化所有外设共用的 SYSCFG/PWR 时钟和全局电源选项。 */
 
   /* USER CODE BEGIN MspInit 0 */
 

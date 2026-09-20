@@ -26,7 +26,7 @@
 
 UART_HandleTypeDef huart2;
 
-/* USART2 init function */
+/* 初始化 USART2；当前 Bootloader 协议主链路使用 FDCAN，串口保留作调试扩展。 */
 
 void MX_USART2_UART_Init(void)
 {
@@ -74,6 +74,8 @@ void MX_USART2_UART_Init(void)
 void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
 {
 
+  /* 配置 USART2 时钟、GPIO 复用和 NVIC 所需的底层资源。 */
+  /* 局部结构体分别保存 GPIO 和外设时钟选择参数。 */
   GPIO_InitTypeDef GPIO_InitStruct = {0};
   RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
   if(uartHandle->Instance==USART2)
@@ -114,6 +116,7 @@ void HAL_UART_MspInit(UART_HandleTypeDef* uartHandle)
 
 void HAL_UART_MspDeInit(UART_HandleTypeDef* uartHandle)
 {
+  /* 释放 USART2 的 GPIO、时钟和中断资源。 */
 
   if(uartHandle->Instance==USART2)
   {

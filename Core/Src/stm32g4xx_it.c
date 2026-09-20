@@ -72,6 +72,7 @@ extern FDCAN_HandleTypeDef hfdcan1;
   */
 void NMI_Handler(void)
 {
+  /* 不可屏蔽中断处理；发生后停机等待调试器分析。 */
   /* USER CODE BEGIN NonMaskableInt_IRQn 0 */
 
   /* USER CODE END NonMaskableInt_IRQn 0 */
@@ -87,6 +88,7 @@ void NMI_Handler(void)
   */
 void HardFault_Handler(void)
 {
+  /* 硬件故障处理；保留现场并停机，避免继续破坏 Flash 状态机。 */
   /* USER CODE BEGIN HardFault_IRQn 0 */
 
   /* USER CODE END HardFault_IRQn 0 */
@@ -102,6 +104,7 @@ void HardFault_Handler(void)
   */
 void MemManage_Handler(void)
 {
+  /* MPU/内存管理故障处理。 */
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
 
   /* USER CODE END MemoryManagement_IRQn 0 */
@@ -117,6 +120,7 @@ void MemManage_Handler(void)
   */
 void BusFault_Handler(void)
 {
+  /* 总线访问故障处理。 */
   /* USER CODE BEGIN BusFault_IRQn 0 */
 
   /* USER CODE END BusFault_IRQn 0 */
@@ -132,6 +136,7 @@ void BusFault_Handler(void)
   */
 void UsageFault_Handler(void)
 {
+  /* 未定义指令或非法状态故障处理。 */
   /* USER CODE BEGIN UsageFault_IRQn 0 */
 
   /* USER CODE END UsageFault_IRQn 0 */
@@ -147,6 +152,7 @@ void UsageFault_Handler(void)
   */
 void SVC_Handler(void)
 {
+  /* SVC 系统服务入口；当前裸机 Bootloader 未定义额外服务。 */
   /* USER CODE BEGIN SVCall_IRQn 0 */
 
   /* USER CODE END SVCall_IRQn 0 */
@@ -160,6 +166,7 @@ void SVC_Handler(void)
   */
 void DebugMon_Handler(void)
 {
+  /* 调试监视器异常入口。 */
   /* USER CODE BEGIN DebugMonitor_IRQn 0 */
 
   /* USER CODE END DebugMonitor_IRQn 0 */
@@ -173,6 +180,7 @@ void DebugMon_Handler(void)
   */
 void PendSV_Handler(void)
 {
+  /* PendSV 异常入口；当前无 RTOS 调度器。 */
   /* USER CODE BEGIN PendSV_IRQn 0 */
 
   /* USER CODE END PendSV_IRQn 0 */
@@ -186,6 +194,7 @@ void PendSV_Handler(void)
   */
 void SysTick_Handler(void)
 {
+  /* SysTick 节拍入口，交由 HAL 更新时间基准。 */
   /* USER CODE BEGIN SysTick_IRQn 0 */
 
   /* USER CODE END SysTick_IRQn 0 */
@@ -207,6 +216,7 @@ void SysTick_Handler(void)
   */
 void FDCAN1_IT0_IRQHandler(void)
 {
+  /* FDCAN1 FIFO0 中断入口：只转发硬件标志，不执行耗时协议处理。 */
   /* USER CODE BEGIN FDCAN1_IT0_IRQn 0 */
   /* Only RX FIFO0 NEW_MESSAGE is enabled by this Bootloader.  Handling that
      one source directly avoids linking HAL_FDCAN_IRQHandler(), whose generic
@@ -231,6 +241,7 @@ void FDCAN1_IT0_IRQHandler(void)
   */
 void FDCAN1_IT1_IRQHandler(void)
 {
+  /* FDCAN1 FIFO1/错误中断入口；当前工程未启用对应通知。 */
   /* USER CODE BEGIN FDCAN1_IT1_IRQn 0 */
 
   /* USER CODE END FDCAN1_IT1_IRQn 0 */

@@ -1,3 +1,11 @@
+/*
+ * STM32G4 Bootloader 协议核心。
+ *
+ * 处理链路固定为：Boot_Input() 在接收上下文中快速入队，Boot_Task()
+ * 在主循环中依次执行命令、Flash 操作、镜像校验和节点自治状态机；
+ * 所有物理发送都通过 Boot_Message_t 和注册的回调离开本模块。
+ * 因此本文件不应直接依赖具体 CAN 帧 ID 或传输层缓冲区布局。
+ */
 #include "bootloader.h"
 #include "stm32g4xx_hal.h"
 
@@ -5,8 +13,8 @@
 #include <string.h>
 
 /* -------------------------------------------------------------------------
- * Internal protocol wire layouts.  These are NOT transport objects.
- * The only object exchanged with CAN/UART/SPI/I2C adapters is Boot_Message_t.
+ * 协议内部线缆布局，这些类型不是传输层对象。
+ * CAN/UART/SPI/I2C 适配层唯一交换的对象是 Boot_Message_t。
  * ------------------------------------------------------------------------- */
 typedef struct
 {
@@ -33,7 +41,7 @@ _Static_assert(sizeof(Boot_ControlResponse_t) == BOOT_CONTROL_SIZE,
 _Static_assert((BOOT_FLASH_WINDOW_BYTES % 8U) == 0U,
                "Flash window must remain double-word aligned");
 
-/* ---------------------- transport boundary ------------------------------- */
+/* ---------------------- 传输层边界 --------------------------------------- */
 static Boot_SendCallback_t g_send_cb = NULL; /* 底层发送回调。 */
 static Boot_FlushCallback_t g_flush_cb = NULL; /* 跳转/复位前排空发送队列的回调。 */
 static void *g_transport_user = NULL; /* 传给底层回调的用户上下文。 */
@@ -43,7 +51,9 @@ static volatile uint16_t g_rx_write = 0U; /* ISR 写入位置。 */
 static volatile uint16_t g_rx_read = 0U; /* 主循环读取位置。 */
 static volatile uint32_t g_rx_overflow = 0U; /* 队列满时丢弃消息的累计次数。 */
 
+/* 组装并发送主机可识别的 8 字节控制响应。 */
 static uint8_t Boot_SendResponse(uint8_t cmd, uint8_t status, const uint8_t *data);
+/* 查询本地 DATA 接收 Bitmap 中某个逻辑包是否已经写入 Flash。 */
 static uint8_t Boot_BitmapGet(uint16_t seq);
 
 static uint8_t Boot_Output(const Boot_Message_t *message)
@@ -103,9 +113,8 @@ static void Boot_FlushTx(uint32_t timeout_ms)
 
 /* ================= CRC ================= */
 /*
- * The CRC peripheral is used directly so the Bootloader does not depend on
- * a CubeMX-generated hcrc handle. All calls are made from the main context;
- * do not call these functions concurrently from interrupts.
+ * 直接使用片上 CRC 外设，使 Bootloader 不依赖 CubeMX 生成的 hcrc 句柄。
+ * 所有调用均来自主循环上下文；禁止与中断并发调用这些函数。
  */
 
 static void Boot_CRCFeedBytes(const uint8_t *data, uint32_t len)
@@ -152,7 +161,7 @@ static void Boot_CRCConfigure(uint32_t polynomial,
 {
     __HAL_RCC_CRC_CLK_ENABLE();
 
-    /* No bit reversal on input or output. */
+    /* 输入和输出均不进行位反转。 */
     MODIFY_REG(CRC->CR,
                CRC_CR_POLYSIZE | CRC_CR_REV_IN | CRC_CR_REV_OUT,
                polynomial_size);
@@ -172,7 +181,7 @@ static uint8_t Boot_CRC8(const uint8_t *data, uint32_t len)
 
     Boot_CRCConfigure((uint32_t)BOOT_CTRL_CRC8_POLY,
                       (uint32_t)BOOT_CTRL_CRC8_INIT,
-                      CRC_CR_POLYSIZE_1); /* 8-bit polynomial */
+                       CRC_CR_POLYSIZE_1); /* 8 位多项式。 */
 
     if (len != 0U)
     {
@@ -192,7 +201,7 @@ static uint32_t Boot_CRC32(const uint8_t *data, uint32_t len)
 
     Boot_CRCConfigure(BOOT_CRC32_POLY,
                       BOOT_CRC32_INIT,
-                      0U); /* 32-bit polynomial */
+                      0U); /* 32 位多项式。 */
 
     if (len != 0U)
     {
@@ -202,7 +211,7 @@ static uint32_t Boot_CRC32(const uint8_t *data, uint32_t len)
     return CRC->DR;
 }
 
-/* ================= STORAGE ================= */
+/* ================= 存储 ================= */
 _Static_assert((BOOT_CONFIG_PAGE_SIZE % 8UL) == 0UL, "Config page must be double-word aligned");
 _Static_assert((BOOT_APP_START_ADDR % 8UL) == 0UL, "APP start must be 8-byte aligned");
 _Static_assert(sizeof(Boot_Config_t) < BOOT_CONFIG_PAGE_SIZE, "Persistent config too large");
@@ -375,7 +384,7 @@ uint8_t Boot_ConfigSave(const Boot_Config_t *cfg)
         return 0U;
     }
 
-    /* Preserve every byte in the last Flash page that is outside our struct. */
+    /* 保留 Flash 最后一页中位于本结构之外的所有字节。 */
     memcpy(g_config_stage.bytes,
            (const void *)BOOT_CONFIG_PAGE_ADDR,
            BOOT_CONFIG_PAGE_SIZE);
@@ -641,7 +650,7 @@ static void Boot_StorageConfigStageAbort(void)
     g_config_stage_active = 0U;
 }
 
-/* ================= RUNTIME ================= */
+/* ================= 运行时 ================= */
 /* 打开备份寄存器写权限，兼容不同 HAL 时钟宏配置。 */
 static void Boot_RuntimeEnableBackupWrite(void)
 {
@@ -785,7 +794,7 @@ static uint8_t Boot_RuntimeValidatePersistedApp(Boot_Config_t *cfg_out)
     return 1U;
 }
 
-/* Trial 运行期间 metadata 会被故意置为 app_valid=0。
+/* Trial 运行期间元数据会被故意置为 app_valid=0。
  * 此处忽略临时失效标志，仅按已保存的长度、CRC 和向量表重新校验镜像。
  */
 static uint8_t Boot_RuntimeValidateTrialImage(Boot_Config_t *cfg_out)
@@ -799,24 +808,23 @@ static uint8_t Boot_RuntimeValidateTrialImage(Boot_Config_t *cfg_out)
 }
 
 /*
- * Transfer control from Bootloader to the application image.
+ * 将控制权从 Bootloader 转交给 APP 镜像。
  *
- * Important: this is NOT equivalent to calling the APP reset handler directly.
- * The Bootloader may leave PLL, peripheral clocks, SysTick and NVIC state very
- * different from reset defaults.  STM32G4 HAL refuses to reconfigure an active
- * PLL when it is still SYSCLK and the requested PLL parameters differ.  This was
- * observed on hardware with a 170 MHz Bootloader and a 168 MHz APP.
+ * 注意：这不等同于直接调用 APP 的复位处理函数。Bootloader 退出时的 PLL、
+ * 外设时钟、SysTick 和 NVIC 状态可能与复位默认值不同。STM32G4 HAL 在
+ * PLL 仍作为 SYSCLK 且目标 PLL 参数不同时拒绝重新配置；硬件上曾出现
+ * Bootloader 为 170 MHz、APP 为 168 MHz 的情况。
  *
- * Therefore the hand-off order is intentionally:
- *   1) HAL_DeInit()      - reset peripheral blocks / MSP low-level state;
- *   2) HAL_RCC_DeInit()  - switch SYSCLK back to HSI and disable HSE/PLL;
- *   3) disable/clear SysTick and all NVIC pending/enabled IRQs;
- *   4) set APP VTOR, CONTROL and MSP;
- *   5) branch to the APP Reset_Handler.
+ * 因此交接顺序必须固定为：
+ *   1) HAL_DeInit()      - 复位外设模块和 MSP 底层状态；
+ *   2) HAL_RCC_DeInit()  - 将 SYSCLK 切回 HSI 并关闭 HSE/PLL；
+ *   3) 禁用并清除 SysTick 及所有 NVIC 挂起/使能中断；
+ *   4) 设置 APP 的 VTOR、CONTROL 和 MSP；
+ *   5) 跳转到 APP 的 Reset_Handler。
  *
- * HAL_DeInit/HAL_RCC_DeInit are called BEFORE __disable_irq(), because their
- * timeout paths use the HAL tick.  After RCC is reset-like, interrupts are then
- * disabled and cleaned before MSP is changed.
+ * HAL_DeInit/HAL_RCC_DeInit 必须在 __disable_irq() 之前调用，因为它们的
+ * 超时路径依赖 HAL tick。RCC 恢复到近似复位状态后，再关闭并清理中断，
+ * 最后修改 MSP。
  */
 static void Boot_RuntimeJumpToApp(void)
 {
@@ -827,10 +835,9 @@ static void Boot_RuntimeJumpToApp(void)
     uint32_t i; /* 清理 NVIC 各寄存器组的循环索引。 */
     AppEntry_t entry = (AppEntry_t)(uintptr_t)app_reset; /* 转换后的 APP 入口函数。 */
 
-    /* Restore a reset-like clock/peripheral state before handing control to
-     * the APP. The Bootloader runs from a different PLL configuration than
-     * Observer_Motor; HAL_RCC_OscConfig() refuses to reconfigure a PLL while
-     * that PLL is still the active SYSCLK source. */
+    /* 在交接给 APP 前恢复近似复位态的时钟/外设状态。Bootloader 与
+     * Observer_Motor 使用不同 PLL 配置；当 PLL 仍是活动 SYSCLK 源时，
+     * HAL_RCC_OscConfig() 会拒绝重新配置该 PLL。 */
     (void)HAL_DeInit();
     (void)HAL_RCC_DeInit();
 
@@ -861,11 +868,11 @@ static void Boot_RuntimeJumpToApp(void)
 
     while (1)
     {
-        /* Should never return. */
+        /* APP 复位处理函数不应返回。 */
     }
 }
 
-/* ================= PROTOCOL ================= */
+/* ================= 协议 ================= */
 static uint8_t g_node_id = BOOT_DEFAULT_NODE_ID; /* 当前节点号。 */
 static Boot_Status_t g_status = BOOT_STATUS_IDLE; /* 当前协议状态。 */
 static Boot_Error_t g_last_error = BOOT_ERR_NONE; /* 最近一次错误码。 */
@@ -890,11 +897,11 @@ static uint8_t g_bitmap[BOOT_BITMAP_SIZE_BYTES]; /* 本地已写入包的接收 
 
 typedef enum
 {
-    BOOT_FLASH_WINDOW_EMPTY = 0U,
-    BOOT_FLASH_WINDOW_FILLING,
-    BOOT_FLASH_WINDOW_READY,
-    BOOT_FLASH_WINDOW_WRITING,
-    BOOT_FLASH_WINDOW_ACK_PENDING
+    BOOT_FLASH_WINDOW_EMPTY = 0U, /* 窗口未分配给任何包范围。 */
+    BOOT_FLASH_WINDOW_FILLING,    /* 正在接收属于该窗口的 DATA 包。 */
+    BOOT_FLASH_WINDOW_READY,      /* 所需包已齐，等待 Flash 写入。 */
+    BOOT_FLASH_WINDOW_WRITING,    /* 正在把窗口内容分批提交到 Flash。 */
+    BOOT_FLASH_WINDOW_ACK_PENDING /* 写入完成，等待发送窗口确认。 */
 } Boot_FlashWindowState_t;
 
 typedef struct
@@ -1102,7 +1109,7 @@ static uint8_t Boot_PrepareVerifiedImage(uint32_t expected_crc)
     actual_crc = Boot_CRC32((const uint8_t *)BOOT_APP_START_ADDR, g_write_size);
     if (actual_crc != expected_crc) { g_last_error = BOOT_ERR_CRC_MISMATCH; return 0U; }
     if (Boot_RuntimeValidateImage(g_write_size, actual_crc) == 0U) { g_last_error = BOOT_ERR_APP_INVALID; return 0U; }
-    /* Autonomous mode is prepare/commit: verified image remains non-bootable until COMMIT_EXECUTE. */
+    /* 自治模式采用 Prepare/Commit：校验通过的镜像在 COMMIT_EXECUTE 前仍不可启动。 */
     if (Boot_StorageSaveAppMetadata(g_write_size, actual_crc, 0U) == 0U) { g_last_error = BOOT_ERR_CONFIG; return 0U; }
     g_config_valid = Boot_ConfigLoad(&g_config);
     if (g_config_valid == 0U) { g_last_error = BOOT_ERR_CONFIG; return 0U; }
@@ -1344,7 +1351,7 @@ static void Boot_UpdateProgress(void)
  */
 static void Boot_TaskFlashWindows(void)
 {
-    Boot_FlashWindow_t *window;
+    Boot_FlashWindow_t *window; /* 当前正在提交或清理的 SRAM 窗口。 */
     uint32_t offset;
     uint32_t valid_len;
     uint8_t data[4];
@@ -1671,17 +1678,17 @@ static uint8_t Boot_SelectProvider(uint16_t seq)
 }
 
 /*
- * SESSION_BEGIN (0x07) is the hard transaction boundary for autonomous update.
- * It deliberately discards all RAM-only state from a previous transaction:
- * async READ/Missing/Provider jobs, staged config writes, active write session,
- * packet bitmap, Guard role, Coordinator/Provider/repair state and old CRC info.
+ * SESSION_BEGIN (0x07) 是自治升级的严格事务边界。
+ * 它会主动丢弃上一个事务的全部 RAM 状态：异步 READ/Missing/Provider 任务、
+ * 配置暂存写入、活动写入会话、包 Bitmap、Guard 角色、
+ * Coordinator/Provider/修复状态以及旧 CRC 信息。
  *
- * Request fields:
- *   seq      = Session Flags;
- *   param[0:1] = Session ID (LE, must be non-zero).
+ * 请求字段：
+ *   seq       = Session 策略标志；
+ *   param[0:1] = Session ID（小端序，必须非零）。
  *
- * A new Session must be followed by SESSION_CRC32 and, when used, SET_GUARD.
- * Session 0 is reserved for Legacy mode and is rejected here.
+ * 新会话之后必须发送 SESSION_CRC32，并可按需发送 SET_GUARD。
+ * Session 0 保留给 Legacy 模式，此处拒绝该值。
  */
 /* 处理主机发起的升级会话建立请求。 */
 static void Boot_HandleSessionBegin(const Boot_ControlFrame_t *frame)
@@ -1832,12 +1839,12 @@ static void Boot_HandleReleaseGuard(const Boot_ControlFrame_t *frame)
 }
 
 /*
- * ERASE (0x10) invalidates APP metadata before touching APP Flash, then erases
- * all APP pages.  Two success responses are intentional:
- *   1) BOOT_STATUS_ERASE immediately after the command is accepted;
- *   2) BOOT_STATUS_READY only after the full erase has completed.
- * Host/CANPro must wait for the second response before starting WRITE.
- * A protected Guard never erases its APP during the primary update phase.
+ * ERASE (0x10) 在操作 APP Flash 前先使 APP 元数据失效，再擦除所有 APP 页。
+ * 这里有意发送两次成功响应：
+ *   1) 接受命令后立即发送 BOOT_STATUS_ERASE；
+ *   2) 完成全部擦除后才发送 BOOT_STATUS_READY。
+ * Host/CANPro 必须等待第二个响应后才能开始 WRITE。
+ * 受保护的 Guard 在主升级阶段不会擦除自身 APP。
  */
 /* 擦除 APP 或配置写入区域并初始化写入会话。 */
 static void Boot_HandleErase(uint8_t cmd)
@@ -1860,7 +1867,7 @@ static void Boot_HandleErase(uint8_t cmd)
 
     //收到立即回复
      (void)Boot_SendResponse(cmd,BOOT_STATUS_ERASE,NULL);
-    /* Power-loss safety: invalidate metadata before touching APP Flash. */
+    /* 掉电安全：操作 APP Flash 前先使元数据失效。 */
     if (Boot_StorageInvalidateApp(g_node_id) == 0U)
     {
         Boot_SendError(cmd, BOOT_ERR_CONFIG);
@@ -1887,13 +1894,12 @@ static void Boot_HandleErase(uint8_t cmd)
 }
 
 /*
- * WRITE (0x11) opens a logical write session.  It does not carry firmware data;
- * it only validates target region/size, computes the expected packet count and
- * clears the per-packet bitmap.  Actual firmware bytes arrive later through
- * 64-byte logical DATA messages (56-byte payload each).
+ * WRITE (0x11) 建立逻辑写入会话，不携带固件数据；它只校验目标区域/大小、
+ * 计算期望包数并清除每包 Bitmap。实际固件字节随后通过 64 字节逻辑
+ * DATA 消息到达（每包有效载荷为 56 字节）。
  *
- * APP writes require a successful ERASE first. Config writes are staged in RAM
- * and committed only by WRITE_END. Bootloader region is always protected.
+ * APP 写入必须先成功完成 ERASE。配置写入先暂存于 RAM，仅由 WRITE_END 提交。
+ * Bootloader 区域始终受保护。
  */
 /* 处理主机发来的写入控制帧，更新写入目标和包参数。 */
 static void Boot_HandleWrite(const Boot_ControlFrame_t *frame)
@@ -1984,12 +1990,12 @@ static void Boot_HandleWrite(const Boot_ControlFrame_t *frame)
 }
 
 /*
- * READ (0x12) starts a non-blocking Flash read.  frame->seq is the requested
- * byte count (1..255) and param[0:3] is the 32-bit absolute Flash address.
+ * READ (0x12) 启动非阻塞 Flash 读取。frame->seq 是请求字节数（1~255），
+ * param[0:3] 是 32 位 Flash 绝对地址。
  *
- * There is no immediate "accepted" ACK. Boot_TaskRead() later emits one or
- * more READY responses, each carrying up to 4 data bytes. This keeps CONTROL
- * frames fixed at 8 bytes while allowing arbitrary small Flash reads.
+ * 命令不会立即回复“已接受” ACK。Boot_TaskRead() 随后发送一个或多个 READY
+ * 响应，每个响应最多携带 4 个数据字节。这样 CONTROL 帧始终固定为 8 字节，
+ * 同时支持任意较小长度的 Flash 读取。
  */
 /* 启动非阻塞 Flash READ 任务。 */
 static void Boot_HandleRead(const Boot_ControlFrame_t *frame)
@@ -2022,15 +2028,13 @@ static void Boot_HandleRead(const Boot_ControlFrame_t *frame)
 }
 
 /*
- * VERIFY (0x13) is the Legacy verification/commit path.
+ * VERIFY (0x13) 是 Legacy 模式的校验/提交路径。
  *
- * It is intentionally forbidden when COORD_COMMIT is active, because a Host
- * VERIFY would otherwise bypass distributed VERIFY + Prepare/Commit and allow
- * one node to become bootable before the rest of the cluster is ready.
+ * 当 COORD_COMMIT 生效时有意禁止该路径，否则 Host VERIFY 会绕过分布式
+ * VERIFY + Prepare/Commit，使某个节点在集群其余节点准备好之前就变为可启动。
  *
- * Legacy success requires: active APP write session, MissingCount==0, complete
- * CRC32 match, valid MSP/Reset_Handler vector, and successful metadata write.
- * Only then is app_valid persisted as 1.
+ * Legacy 成功必须同时满足：APP 写入会话有效、MissingCount==0、CRC32 完整匹配、
+ * MSP/Reset_Handler 向量有效且元数据写入成功。只有这样才会将 app_valid 持久化为 1。
  */
 /* 校验本地 APP 镜像大小、向量表和 CRC32。 */
 static void Boot_HandleVerify(const Boot_ControlFrame_t *frame)
@@ -2109,19 +2113,18 @@ static void Boot_HandleVerify(const Boot_ControlFrame_t *frame)
 }
 
 /*
- * WRITE_END (0x14) closes the first firmware stream and converts the local
- * packet bitmap into the next protocol action.
+ * WRITE_END (0x14) 关闭第一阶段固件数据流，并根据本地包 Bitmap 决定下一步协议动作。
  *
- * Legacy/unicast:
- *   - Missing > 0 : enter REPAIR and stream MISSING_COUNT/MISSING_ITEM to Host;
- *   - Missing = 0 : enter VERIFY and let Host send Legacy VERIFY.
+ * Legacy/单播：
+ *   - Missing > 0：进入 REPAIR，并向 Host 发送 MISSING_COUNT/MISSING_ITEM；
+ *   - Missing = 0：进入 VERIFY，等待 Host 发送 Legacy VERIFY。
  *
- * Autonomous/broadcast with PEER_RECOVERY:
- *   - detailed Missing information is sent only through Peer Control;
- *   - Coordinator election starts only here, AFTER the initial full broadcast;
- *   - no node is a fixed master during the first DATA injection.
+ * 启用 PEER_RECOVERY 的自治/广播模式：
+ *   - 详细缺包信息只通过节点间控制帧发送；
+ *   - 协调者竞选只在这里、初次完整广播结束后启动；
+ *   - 第一次 DATA 注入期间没有固定主节点。
  *
- * Config-region WRITE_END commits the RAM staging page instead of APP verify.
+ * 配置区 WRITE_END 提交 RAM 暂存页，而不是执行 APP 校验。
  */
 /* 处理写入结束请求，触发缺包报告或分布式恢复流程。 */
 static void Boot_HandleWriteEnd(const Boot_ControlFrame_t *frame)
@@ -2161,7 +2164,7 @@ static void Boot_HandleWriteEnd(const Boot_ControlFrame_t *frame)
                   (g_session_active != 0U) &&
                   ((g_session_flags & BOOT_SESSION_FLAG_PEER_RECOVERY) != 0U)) ? 1U : 0U;
 
-    /* Peer election is intentionally delayed until the first broadcast ends. */
+    /* 节点竞选有意延迟到第一次广播结束后。 */
     if (frame->target == BOOT_BROADCAST_ID)
     {
         Boot_StartPeerElection();
@@ -2202,22 +2205,20 @@ static void Boot_HandleWriteEnd(const Boot_ControlFrame_t *frame)
 
     g_status = BOOT_STATUS_VERIFY;
     g_progress = 100U;
-    if (autonomous == 0U) Boot_StartMissingReport(); /* Legacy Host report. */
+    if (autonomous == 0U) Boot_StartMissingReport(); /* Legacy Host 缺包报告。 */
     (void)Boot_SendResponse(frame->cmd, BOOT_STATUS_VERIFY, data);
 }
 
 /*
- * PROVIDER_GRANT (0x17) is the Legacy Host-directed repair mechanism.
- * The Host unicasts this CONTROL command to exactly one Provider node and asks
- * it to send a Sequence range to a target node/broadcast address.
+ * PROVIDER_GRANT (0x17) 是 Legacy 模式由 Host 指定的修复机制。
+ * Host 将该 CONTROL 命令单播给一个 Provider 节点，请求它向目标节点/广播地址
+ * 发送指定 Sequence 范围的数据。
  *
- * Broadcast grants are silently ignored by design: allowing multiple healthy
- * nodes to accept the same grant would make them transmit identical DATA at the
- * same time and destroy deterministic bus arbitration/repair behavior.
+ * 广播授予会按设计静默忽略：若多个健康节点接受同一授予，它们会同时发送
+ * 相同 DATA，破坏总线确定性仲裁和修复行为。
  *
- * First response = WRITE (task accepted). Final response = READY only after all
- * DATA has been handed to the transport and Boot_FlushTx() confirms the physical
- * Classic fragments/native FD frames have drained.
+ * 第一个响应为 WRITE（任务已接受）。只有在所有 DATA 交给传输层，且
+ * Boot_FlushTx() 确认经典 CAN 分片/原生 FD 帧均已排空后，才发送最终 READY。
  */
 /* 处理主机授予的 Provider 补包任务。 */
 static void Boot_HandleProviderGrant(const Boot_ControlFrame_t *frame)
@@ -2228,9 +2229,8 @@ static void Boot_HandleProviderGrant(const Boot_ControlFrame_t *frame)
     uint16_t count;
     uint32_t end_seq;
 
-    /* Provider selection MUST be unicast. A broadcast grant could make several
-     * healthy nodes transmit simultaneously, which this protocol forbids.
-     */
+    /* Provider 选择必须是单播。广播授予可能导致多个健康节点同时发送，
+     * 这是本协议禁止的行为。 */
     if (frame->target == BOOT_BROADCAST_ID)
     {
         return;
@@ -2523,7 +2523,7 @@ static void Boot_ProcessControl(const uint8_t *data, uint8_t len)
 
     if (Boot_CRC8(data, 7U) != data[7])
     {
-        /* Do not trust target/cmd fields enough to generate an error response. */
+        /* target/cmd 字段尚未通过校验，不能据此生成错误响应。 */
         g_last_error = BOOT_ERR_BAD_CRC;
         return;
     }
@@ -2765,21 +2765,20 @@ static void Boot_StartVerifyContext(uint8_t context)
 }
 
 /*
- * Consume one 8-byte node-to-node Peer Control frame.
+ * 消费一帧 8 字节节点间 Peer Control 控制帧。
  *
- * Logical layout:
- *   Byte0    Target Node or 0xFF
- *   Byte1    Peer command
- *   Byte2    Source Node
- *   Byte3-4  Session ID (LE)
- *   Byte5-6  16-bit command value (LE)
+ * 逻辑布局：
+ *   Byte0    目标节点或 0xFF
+ *   Byte1    节点间命令
+ *   Byte2    源节点
+ *   Byte3-4  Session ID（小端序）
+ *   Byte5-6  16 位命令值（小端序）
  *   Byte7    CRC8
  *
- * The CAN adapter has already checked that CAN ID 0x600+N agrees with Byte2=N.
- * Core then rejects wrong Target, wrong Session, invalid Source and bad CRC.
- * Most Peer commands intentionally have no generic ACK: protocol completion is
- * represented by a paired command (VERIFY_RESULT, COMMIT_ACK...), DATA followed
- * by PROVIDER_DONE, or a timeout/next recovery phase.
+ * CAN 适配层已经检查 CAN ID 0x600+N 与 Byte2=N 一致。
+ * 核心层随后拒绝错误目标、错误 Session、非法源节点和错误 CRC。
+ * 大多数 Peer 命令有意不发送通用 ACK，协议完成由配对命令（VERIFY_RESULT、
+ * COMMIT_ACK 等）、DATA 后的 PROVIDER_DONE 或超时/下一恢复阶段表示。
  */
 /* 校验并分发节点间协调控制帧。 */
 static void Boot_ProcessPeerControl(const uint8_t *data, uint8_t len)
@@ -3098,18 +3097,15 @@ static void Boot_ProcessPeerControl(const uint8_t *data, uint8_t len)
 }
 
 /*
- * Consume one complete 64-byte logical firmware DATA packet.
+ * 消费一个完整的 64 字节逻辑固件 DATA 包。
  *
- * DATA is transport-independent here: native CAN FD arrives as one 64-byte
- * frame; Classic CAN has already been reassembled from IDs 0x100..0x107 by the
- * adapter.  The Core therefore sees exactly the same 64-byte object in both
- * modes.
+ * 此处 DATA 与传输无关：原生 CAN FD 以一个 64 字节帧到达；经典 CAN 已由
+ * 适配层根据 0x100~0x107 ID 重组。因此核心在两种传输下看到完全相同的
+ * 64 字节对象。
  *
- * Critical reliability rule: a packet bitmap bit is set ONLY after Flash write
- * and immediate read-back verification succeed.  Missing/failed packets remain
- * bit=0 and are repaired later; the initial stream never stalls on one bad Seq.
- * Duplicate packets whose bit is already 1 are ignored to avoid unnecessary
- * Flash programming.
+ * 关键可靠性规则：只有 Flash 写入并立即回读校验成功后，才置位包 Bitmap。
+ * 缺失/失败包保持 bit=0，稍后再修复；初始数据流不会因单个错误 Seq 停止。
+ * 已置位的重复包会被忽略，避免不必要的 Flash 编程。
  */
 /* 校验并处理一帧固件 DATA，包括窗口缓存和 Flash 提交。 */
 static void Boot_ProcessData(const uint8_t *data, uint8_t len)
@@ -3149,7 +3145,7 @@ static void Boot_ProcessData(const uint8_t *data, uint8_t len)
 
     if (Boot_IsGuardProtected() != 0U)
     {
-        /* Guard only listens during phase 1; it never touches its APP/config. */
+        /* Guard 只在阶段 1 监听；它绝不会修改自身 APP/配置。 */
         return;
     }
 
@@ -3168,7 +3164,7 @@ static void Boot_ProcessData(const uint8_t *data, uint8_t len)
 
     if (Boot_BitmapGet(seq) != 0U)
     {
-        /* Duplicate packet: already read-back verified locally, do not program again. */
+        /* 重复包：本地已经回读校验通过，不再重复编程。 */
         return;
     }
 
@@ -3212,9 +3208,8 @@ static void Boot_ProcessData(const uint8_t *data, uint8_t len)
 
     if (ok == 0U)
     {
-        /* Packet failure does NOT abort the transfer. Keep bitmap bit at 0 and
-         * continue receiving later packets; the master repairs it after WRITE_END.
-         */
+        /* 包处理失败不会中止传输。保持 Bitmap bit=0，继续接收后续包；
+         * 主节点会在 WRITE_END 后修复该包。 */
         g_last_error = BOOT_ERR_FLASH_WRITE;
         return;
     }
@@ -3225,7 +3220,7 @@ static void Boot_ProcessData(const uint8_t *data, uint8_t len)
 
     if (g_status == BOOT_STATUS_REPAIR)
     {
-        /* Stay in REPAIR until master sends WRITE_END again after the round. */
+        /* 保持 REPAIR，直到主节点在本轮结束后再次发送 WRITE_END。 */
     }
     else
     {
@@ -3234,12 +3229,11 @@ static void Boot_ProcessData(const uint8_t *data, uint8_t len)
 }
 
 /*
- * Asynchronous READ producer. One Boot_Task() pass emits at most one RESPONSE,
- * carrying up to 4 Flash bytes. This avoids monopolizing the TX queue and lets
- * CAN RX / recovery tasks continue to run between read chunks.
+ * 异步 READ 生产任务。每次 Boot_Task() 最多发送一个 RESPONSE，携带最多 4
+ * 个 Flash 字节。这样不会独占 TX 队列，并允许 CAN RX/恢复任务在读取块之间运行。
  *
- * No offset is encoded in each response; Host reconstructs bytes in arrival
- * order starting from the address/length supplied in the original READ request.
+ * 每个响应不编码偏移量；Host 根据原始 READ 请求中的地址/长度，从到达顺序
+ * 开始重构数据。
  */
 /* 每次主循环发送一段 Flash READ 结果，避免阻塞协议处理。 */
 static void Boot_TaskRead(void)
@@ -3273,13 +3267,13 @@ static void Boot_TaskRead(void)
 }
 
 /*
- * Legacy Host-facing Missing report.
- * First emit exactly one MISSING_COUNT frame containing {missing,total}; then
- * emit one MISSING_ITEM per missing Sequence.  Only one frame is attempted per
- * Boot_Task() call, so a busy transport cannot block the main loop.
+ * 面向 Legacy Host 的缺包报告。
+ * 首先准确发送一帧包含 {missing,total} 的 MISSING_COUNT；随后每个缺失
+ * Sequence 发送一帧 MISSING_ITEM。每次 Boot_Task() 只尝试发送一帧，因此
+ * 忙碌的传输层不会阻塞主循环。
  *
- * Autonomous broadcast mode does NOT use this detailed 0x50x stream; it uses
- * Boot_TaskPeerMissingReport() on 0x60x to avoid duplicating bus traffic.
+ * 自治广播模式不使用这组详细的 0x50x 流，而是使用 0x60x 上的
+ * Boot_TaskPeerMissingReport()，避免重复占用总线流量。
  */
 /* 分时发送主机缺包数量和缺包序号。 */
 static void Boot_TaskMissingReport(void)
@@ -3331,7 +3325,7 @@ static void Boot_TaskMissingReport(void)
             }
             else
             {
-                /* Retry this sequence next Task() call. */
+                /* 下次 Task() 调用时重试此 Sequence。 */
                 g_missing_scan_seq--;
             }
             return;
@@ -3342,15 +3336,14 @@ static void Boot_TaskMissingReport(void)
 }
 
 /*
- * Provider DATA producer shared by Legacy PROVIDER_GRANT and autonomous repair.
- * One logical DATA packet is staged per task iteration.  When the last packet is
- * accepted by the transport, completion is NOT announced immediately: accepted
- * only means queued/staged, especially in Classic mode where one logical 64-byte
- * DATA still has eight physical 8-byte fragments to drain.
+ * Legacy PROVIDER_GRANT 与自治修复共用的 Provider DATA 生产任务。
+ * 每次任务迭代暂存一个逻辑 DATA 包。最后一个包被传输层接受后不会立即
+ * 宣布完成：accepted 只表示已入队/暂存，尤其在经典 CAN 模式下，一个逻辑
+ * 64 字节 DATA 仍要排空 8 个物理 8 字节分片。
  *
- * g_provider_done_pending therefore forces Boot_FlushTx() before READY or
- * PROVIDER_DONE is emitted.  Without this barrier the Coordinator could start a
- * new Missing scan before the final 0x100..0x107 fragments reached the bus.
+ * 因此 g_provider_done_pending 会强制在发送 READY 或 PROVIDER_DONE 前调用
+ * Boot_FlushTx()。没有这个屏障，Coordinator 可能在最后的 0x100~0x107
+ * 分片到达总线前就开始新一轮缺包扫描。
  */
 /* 分时执行 Provider 补包发送任务。 */
 static void Boot_TaskProvider(void)
@@ -3360,9 +3353,9 @@ static void Boot_TaskProvider(void)
 
     if (g_provider_done_pending != 0U)
     {
-        /* Boot_SendData() means accepted/staged, not necessarily physically sent.
-         * Drain native FD TX FIFO or Classic 0x100..0x107 fragments before DONE,
-         * otherwise the coordinator may start the next Missing scan too early. */
+        /* Boot_SendData() 表示已接受/暂存，不一定已经物理发送。
+         * DONE 前必须排空原生 FD TX FIFO 或经典 CAN 0x100~0x107 分片，
+         * 否则 Coordinator 可能过早开始下一轮缺包扫描。 */
         Boot_FlushTx(20U);
 
         if (g_provider_peer_mode != 0U)
@@ -3470,9 +3463,9 @@ static void Boot_TaskElection(void)
         return;
     }
 
-    /* Deterministic claim slots: Node1 gets the first slot, then Node2, etc.
-     * If a lower-ID node reported during discovery but dies before claiming,
-     * the next live ID automatically claims in its later slot. */
+    /* 确定性竞选时隙：Node1 首先竞选，然后是 Node2 等。
+     * 如果较小 ID 节点在发现阶段报告在线、但在竞选前掉线，
+     * 后续仍在线的节点会在自己的时隙自动竞选。 */
     wait_ms = BOOT_COORD_ELECTION_DELAY_MS +
               ((uint32_t)(g_node_id - 1U) * BOOT_COORD_CLAIM_SLOT_MS);
     if ((HAL_GetTick() - g_election_started_ms) < wait_ms) return;
@@ -3931,7 +3924,7 @@ uint8_t Boot_GetProgress(void)
 
 
 /* ========================================================================
- * Public transport-independent entry points
+ * 对外提供的、与传输无关的入口函数。
  * ======================================================================== */
 /* 绑定传输回调并初始化 Bootloader 核心。 */
 void Boot_Init(uint8_t default_node_id,
@@ -4002,7 +3995,7 @@ void Boot_Task(void)
     Boot_Message_t message;
     uint8_t budget = 16U;
 
-    /* Heavy work happens here, never in the communication ISR. */
+    /* 耗时工作统一在这里执行，绝不在通信中断中执行。 */
     while ((budget-- > 0U) && (Boot_PopInput(&message) != 0U))
     {
         if ((message.type == (uint8_t)BOOT_MESSAGE_CONTROL) &&

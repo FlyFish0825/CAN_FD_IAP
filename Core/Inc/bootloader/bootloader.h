@@ -299,28 +299,45 @@ typedef struct
 
 /* -------------------------- Public API ---------------------------------- */
 
-/* 初始化协议核心、节点号、发送回调和传输上下文；应在 HAL/时钟初始化后调用一次。 */
+/**
+ * @brief 初始化协议核心和传输边界。
+ * @param default_node_id 无有效配置时使用的节点号。
+ * @param send_cb        逻辑消息发送回调，不能为 NULL。
+ * @param flush_cb       跳转/复位前排空物理发送队列的可选回调。
+ * @param transport_user 传回 send_cb/flush_cb 的底层句柄或上下文。
+ * @note 应在 HAL、时钟和传输外设初始化完成后调用一次。
+ */
 void Boot_Init(uint8_t default_node_id,
                Boot_SendCallback_t send_cb,
                Boot_FlushCallback_t flush_cb,
                void *transport_user);
 
-/* 底层向核心投递一条完整逻辑消息；只复制入队，可在短小 RX 回调/ISR 中调用。 */
+/**
+ * @brief 向协议核心投递一条完整逻辑消息。
+ * @param message 已完成组帧的控制、DATA 或节点间控制消息。
+ * @return 1 表示已复制入接收队列，0 表示参数无效或队列已满。
+ * @note 函数只做校验和入队，可在短小的接收回调/ISR 中调用。
+ */
 uint8_t Boot_Input(const Boot_Message_t *message);
 
-/* 主循环持续调用的非阻塞任务入口，处理接收队列、Flash 和自治状态机。 */
+/**
+ * @brief 执行一次非阻塞协议任务。
+ * @note 主循环应持续调用；函数负责消费接收队列、推进 Flash 操作、
+ *       缺包恢复和分布式提交状态机，不应从中断上下文调用。
+ */
 void Boot_Task(void);
 
 /* APP 请求下次复位进入 Bootloader：写入备份寄存器魔数。 */
 void Boot_RequestBootloader(void);
 
-/* 判断持久化 APP 是否有效且允许安全跳转。 */
+/** @brief 判断持久化 APP 是否通过元数据、向量表和 CRC 校验。 */
 uint8_t Boot_ShouldJumpApp(void);
-/* 清理外设/中断并跳转到 APP Reset_Handler。 */
+/** @brief 恢复接近复位态的硬件环境并跳转到 APP Reset_Handler。 */
 void Boot_JumpApp(void);
 
-/* 读取或保存与 APP 共用的持久化配置页。 */
+/** @brief 从配置页读取并校验 Boot_Config_t。 */
 uint8_t Boot_ConfigLoad(Boot_Config_t *cfg);
+/** @brief 校验并把 Boot_Config_t 写入配置页。 */
 uint8_t Boot_ConfigSave(const Boot_Config_t *cfg);
 
 uint8_t  Boot_GetNodeId(void);          /* 读取当前节点号。 */

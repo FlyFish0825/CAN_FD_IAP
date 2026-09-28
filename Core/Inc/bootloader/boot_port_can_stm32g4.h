@@ -23,8 +23,8 @@ uint8_t BootPort_CAN_Send(const Boot_Message_t *message, void *user);
  */
 void BootPort_CAN_Flush(void *user, uint32_t timeout_ms);
 
-/* Drain a staged 64-byte DATA message as 8 Classic CAN fragments when the
- * FDCAN peripheral is configured in Classic-only mode. Call from main loop. */
+/* 当 FDCAN 配置为仅经典 CAN 模式时，将暂存的 64 字节 DATA 消息拆成
+ * 8 个经典 CAN 分片发送；应由主循环调用。 */
 void BootPort_CAN_Task(void *user);
 
 /**

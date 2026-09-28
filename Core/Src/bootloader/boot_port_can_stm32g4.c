@@ -55,8 +55,8 @@ static uint8_t g_classic_data_active = 0U;
 /* 下一个允许接收的经典 CAN 分片序号，范围为 1~7。 */
 static uint8_t g_classic_expected_fragment = 0U;
 
-/* Classic-only TX fallback for Provider DATA. One logical 64-byte message is
- * staged here and drained by BootPort_CAN_Task() as IDs 0x100..0x107. */
+/* 经典 CAN 专用的 Provider DATA 发送后备路径：一个 64 字节逻辑消息先
+ * 暂存于此，再由 BootPort_CAN_Task() 以 0x100~0x107 ID 分片发送。 */
 /* 经典 CAN 发送分片的临时缓冲区，保存待拆分的完整 DATA 消息。 */
 static uint8_t g_classic_tx_buffer[BOOT_DATA_SIZE];
 /* 经典 CAN 发送是否有待发送的逻辑 DATA 包。 */
@@ -71,7 +71,7 @@ static uint8_t g_classic_tx_fragment = 0U;
  * @brief 将 Bootloader 的逻辑消息编码并放入 FDCAN 发送队列。
  *
  * 控制和节点间消息使用 8 字节经典 CAN；固件 DATA 消息优先使用 64
- * 字节 CAN FD，若外设处于 Classic-only 模式则暂存，交由
+ * 字节 CAN FD，若外设处于仅经典 CAN 模式则暂存，交由
  * BootPort_CAN_Task() 逐帧发送。
  */
 uint8_t BootPort_CAN_Send(const Boot_Message_t *message, void *user)
@@ -97,7 +97,7 @@ uint8_t BootPort_CAN_Send(const Boot_Message_t *message, void *user)
     if (message->type == (uint8_t)BOOT_MESSAGE_CONTROL)
     {
         if (message->len != BOOT_CONTROL_SIZE) return 0U;
-        /* Response payload Byte0 is Node ID. */
+        /* 回复载荷 Byte0 固定为节点号。 */
         tx.Identifier = BOOT_CAN_RESPONSE_BASE_ID + message->data[0];
         tx.BitRateSwitch = FDCAN_BRS_OFF;
         tx.FDFormat = FDCAN_CLASSIC_CAN;
@@ -225,8 +225,7 @@ static void BootPort_CAN_ProcessClassicDataFragment(
     fragment = (uint8_t)(can_id - 0x100U);
 
     /*
-     * Fragment 0 represents the start of one new
-     * 64-byte logical DATA packet.
+     * 分片 0 表示一个新的 64 字节逻辑 DATA 包开始。
      */
     if (fragment == 0U)
     {
@@ -242,18 +241,16 @@ static void BootPort_CAN_ProcessClassicDataFragment(
     }
 
     /*
-     * Require strict order:
+     * 要求分片严格按以下顺序到达：
      *
      * 0x100
      * 0x101
      * ...
      * 0x107
      *
-     * If one Classic CAN frame is lost, discard
-     * this complete logical packet.
+     * 若任意一个经典 CAN 帧丢失，则丢弃当前完整逻辑包。
      *
-     * The upper Sequence Bitmap will later
-     * identify the firmware packet as missing.
+     * 上层 Sequence Bitmap 会在之后识别出该固件包缺失。
      */
     if ((g_classic_data_active == 0U) ||
         (fragment != g_classic_expected_fragment))
@@ -276,7 +273,7 @@ static void BootPort_CAN_ProcessClassicDataFragment(
         return;
     }
 
-    /* 8 Classic CAN frames -> one logical DATA message */
+    /* 8 个经典 CAN 帧重组为 1 个逻辑 DATA 消息。 */
     message.type = BOOT_MESSAGE_DATA;
     message.len  = 64U;
 
@@ -335,7 +332,7 @@ void BootPort_CAN_RxFifo0Callback(
         }
 
         /* =========================
-         * CONTROL
+         * 控制帧
          * ========================= */
 
         if ((rx_header.FDFormat == FDCAN_CLASSIC_CAN) &&
@@ -353,8 +350,8 @@ void BootPort_CAN_RxFifo0Callback(
         }
 
         /* =========================
-         * PEER CONTROL: Node -> Nodes, ID 0x601..0x608.
-         * Byte2 always carries the source Node ID and is checked here.
+         * 节点间控制帧：节点 -> 节点，ID 为 0x601~0x608。
+         * Byte2 始终携带源节点号，并在这里进行一致性校验。
          * ========================= */
         if ((rx_header.FDFormat == FDCAN_CLASSIC_CAN) &&
             (rx_header.Identifier >= (BOOT_CAN_PEER_BASE_ID + 1U)) &&
@@ -374,7 +371,7 @@ void BootPort_CAN_RxFifo0Callback(
         }
 
         /* =========================
-         * DATA - native CAN FD
+         * DATA - 原生 CAN FD
          * ========================= */
 
         if ((rx_header.FDFormat == FDCAN_FD_CAN) &&
@@ -392,7 +389,7 @@ void BootPort_CAN_RxFifo0Callback(
         }
 
         /* =========================
-         * DATA - Classic CAN fallback
+         * DATA - 经典 CAN 后备分片
          * ========================= */
 
         if ((rx_header.FDFormat == FDCAN_CLASSIC_CAN) &&
@@ -439,7 +436,7 @@ void BootPort_CAN_Filter_Init(void) {
     Error_Handler();
   }
 
-  /* 0x601~0x608 peer-control. Mask admits 0x600~0x60F; adapter checks exact range. */
+  /* 0x601~0x608 节点间控制帧。掩码会放行 0x600~0x60F，适配层再检查精确范围。 */
   filter.FilterIndex = 2;
   filter.FilterID1 = 0x600;
   filter.FilterID2 = 0x7F0;

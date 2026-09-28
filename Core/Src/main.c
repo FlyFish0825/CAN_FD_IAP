@@ -22,6 +22,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+/* 板级时钟配置、Bootloader 协议核心和 FDCAN 传输适配层的项目接口。 */
 #include "board_config.h"
 #include "bootloader.h"
 #include "boot_port_can_stm32g4.h"
@@ -45,7 +46,7 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+/* 当前没有需要在 main.c 中长期保存的用户态全局变量。 */
 
 /* USER CODE END PV */
 
@@ -53,12 +54,12 @@
 /* 配置 HSE、PLL、SYSCLK、AHB 和 APB 时钟树。 */
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
-
+/* 用户自定义函数原型为空；Bootloader 接口由对应头文件提供。 */
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+/* 预留可被 CubeMX 保留的用户辅助代码区；当前无需额外辅助函数。 */
 /* USER CODE END 0 */
 
 /**
@@ -70,7 +71,7 @@ int main(void)
   /* 固件主入口：初始化 HAL、时钟、FDCAN 和 Bootloader，然后持续轮询任务。 */
 
   /* USER CODE BEGIN 1 */
-
+  /* 复位后的最早用户初始化区；当前初始化统一放在 HAL 和时钟完成之后。 */
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -79,14 +80,14 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  /* HAL_Init() 完成后、系统时钟切换前的用户初始化区；当前不执行协议操作。 */
   /* USER CODE END Init */
 
   /* Configure the system clock */
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  /* 系统时钟配置完成后的用户区；外设启动和过滤器配置放入下方 USER CODE 2。 */
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -94,9 +95,10 @@ int main(void)
      MX_GPIO_Init() only enabled unused GPIO clocks, so it is omitted here. */
   MX_FDCAN1_Init();
   /* USER CODE BEGIN 2 */
-
+  /* 配置接收过滤器，使控制帧、DATA 帧和节点间帧进入统一接收路径。 */
   BootPort_CAN_Filter_Init();
 
+  /* 注册节点号、发送回调、发送排空回调和底层 FDCAN 句柄。 */
   Boot_Init(1,BootPort_CAN_Send,BootPort_CAN_Flush,&hfdcan1);
   /* 根据持久化元数据判断是否可以安全跳转到 APP。 */
   if (Boot_ShouldJumpApp() != 0U) {
@@ -117,11 +119,13 @@ int main(void)
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    /* 每轮先推进经典 CAN 分片发送，再处理协议队列和 Flash 状态机。 */
     BootPort_CAN_Task(&hfdcan1);
     Boot_Task();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    /* 当前循环没有额外的用户逻辑；Bootloader 任务已在上方完成。 */
   }
   /* USER CODE END 3 */
 }
@@ -195,6 +199,7 @@ void Error_Handler(void)
 {
   /* HAL 初始化失败时关闭中断并停机，防止在未配置硬件上继续运行。 */
   /* USER CODE BEGIN Error_Handler_Debug */
+  /* 该用户区适合增加板级故障指示，但不能阻塞或改变停机安全语义。 */
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
@@ -214,6 +219,7 @@ void assert_failed(uint8_t *file, uint32_t line)
 {
   /* 参数断言失败入口；当前版本保留 file/line 供调试器查看。 */
   /* USER CODE BEGIN 6 */
+  /* 断言参数仅用于调试定位；当前不通过串口或 CAN 输出故障文本。 */
   /* User can add his own implementation to report the file name and line number,
      ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
   /* USER CODE END 6 */

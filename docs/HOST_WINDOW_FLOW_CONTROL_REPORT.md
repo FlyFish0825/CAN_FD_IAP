@@ -5,7 +5,8 @@
 - Bootloader 协议版本：`1.3.1`
 - MCU：STM32G431
 - APP 起始地址：`0x08005000`
-- CAN FD：仲裁段 500 kbit/s，BRS 数据段 5 Mbit/s
+- 晶振：16 MHz HSE，SYSCLK/FDCAN 内核时钟 168 MHz
+- CAN FD：仲裁段 1 Mbit/s，BRS 数据段 8 Mbit/s
 - 本报告只描述 Host 对单节点 Legacy 下载的新增窗口流控要求。
 
 ## 2. 修改原因

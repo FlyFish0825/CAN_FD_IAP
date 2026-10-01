@@ -136,7 +136,7 @@ int main(void)
   */
 void SystemClock_Config(void)
 {
-  /* 振荡器和 PLL 参数结构体，按板卡 HSE 频率选择 PLLN。 */
+  /* 振荡器和 PLL 参数结构体，按 16 MHz HSE 配置固定 PLLN。 */
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   /* CPU、AHB、APB 总线时钟分频结构体。 */
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
@@ -153,17 +153,14 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   /*
-   * 24 MHz 与 16 MHz 晶振统一生成精确的 168 MHz SYSCLK/FDCAN 时钟：
-   * 24 / 2 * 28 / 2 = 168 MHz；16 / 2 * 42 / 2 = 168 MHz。
+   * 16 MHz 晶振生成精确的 168 MHz SYSCLK/FDCAN 内核时钟：
+   * 16 / PLLM(2) = 8 MHz VCO 输入，× PLLN(42) = 336 MHz VCO，
+   * / PLLR(2) = 168 MHz SYSCLK。
+   * PLLN 与 board_config.h 的 BOARD_HSE_HZ 相互绑定：该文件已把外部晶振
+   * 限定为 16 MHz，换晶振时会先在那里编译失败，不会产出时钟错误的固件。
    */
   RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV2;
-#if BOARD_HSE_HZ == 24000000UL
-  RCC_OscInitStruct.PLL.PLLN = 28;
-#elif BOARD_HSE_HZ == 16000000UL
   RCC_OscInitStruct.PLL.PLLN = 42;
-#else
-#error "Unsupported BOARD_HSE_HZ: use 24000000 or 16000000"
-#endif
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
   RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;

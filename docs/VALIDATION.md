@@ -8,12 +8,12 @@
 cmake --build --preset Release --clean-first
 ```
 
-当前工作树（2026-09-20）完成 clean build 的结果：
+当前工作树（16 MHz 正式版）完成 clean build 的结果：
 
 ```text
 RAM    17904 B / 32 KiB  54.64%
-FLASH 17976 B / 20 KiB  87.77%
-剩余   2504 B
+FLASH 17940 B / 20 KiB  87.60%
+剩余   2540 B
 0 compiler/linker error
 ```
 
@@ -30,7 +30,7 @@ Linker 固定 `FLASH ORIGIN=0x08000000, LENGTH=20K`，Bootloader 超过 `0x08004
 | 删除 UART 后 | 17,688 B |
 | Release 编译细化后 | 17,344 B |
 | V1.3 历史精简构建 | 16,488 B |
-| 当前工作树 clean build | **17,976 B** |
+| 16 MHz 正式版 Release（当前） | **17,940 B** |
 
 V1.3 静态检查结果：
 

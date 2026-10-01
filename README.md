@@ -9,7 +9,7 @@ V1.3 是基于 V1.2 协议的 **Flash 体积优化版本**。命令、CAN ID、C
 - 纯 C 固件不再链接无用的 GCC CRT/C++ 构造器启动框架；
 - Bootloader 中断向量表裁剪到当前最高使用的 FDCAN1 IT0；
 - FDCAN 接收中断只处理 FIFO0 新消息，不再链接 HAL 通用中断分派器；
-- 历史精简 Release 曾将 Flash 从 19,324 B 降到 16,488 B；当前工作树 Release 为 17,976 B，20 KiB 分区剩余 2,504 B。
+- 历史精简 Release 曾将 Flash 从 19,324 B 降到 16,488 B；当前 16 MHz 正式版 Release 为 17,940 B，20 KiB 分区剩余 2,540 B。
 
 V1.2 在 V1.1 的广播升级、Bitmap、Missing、Provider、Session、Coordinator 基础上补齐：
 
@@ -69,11 +69,10 @@ Bootloader 和 APP 不会同时执行，因此二者可以使用同一整块 SRA
 
 ### 晶振与 CAN 位速率
 
-- 支持 24 MHz 与 16 MHz 两种板载晶振构建；默认预设为 24 MHz。
-- 两种构建均把 SYSCLK/FDCAN 内核时钟配置为精确的 168 MHz。
-- CAN 仲裁段为 1 Mbit/s，CAN FD+BRS 数据段为 8 Mbit/s。
-- 16 MHz 板先把 `Core/Inc/board_config.h` 中的 `BOARD_HSE_HZ` 改为 `16000000UL`，
-  再使用普通 `Debug` 或 `Release` 预设编译；固件不能在不同晶振板之间混刷。
+- 本工程只支持 **16 MHz** 板载晶振。`Core/Inc/board_config.h` 的 `BOARD_HSE_HZ` 是整机时钟的唯一来源，已限定为 `16000000UL`，改成其它频率会直接编译失败。
+- 16 MHz HSE 经 `PLLM=/2 → 8 MHz`、`PLLN=×42 → 336 MHz VCO`、`PLLR=/2 → 168 MHz`，得到精确的 168 MHz SYSCLK/FDCAN 内核时钟。
+- CAN 仲裁段为 1 Mbit/s，CAN FD+BRS 数据段为 8 Mbit/s；两者都由 168 MHz 精确整除得到（`168M/(3×56)`、`168M/(1×21)`），与晶振频率无关。
+- `main.c` 的 PLLN 固定为 42，与 `board_config.h` 的 `BOARD_HSE_HZ` 相互绑定；更换晶振必须同时修改这两处，且固件不能混刷到不同晶振的板子。
 
 ### Bootloader → APP 安全跳转
 
@@ -622,10 +621,10 @@ ID=0x100 FD=1 BRS=1 DLC=64 SEQ=<n> DATA=<64B>
 cmake --build --preset Release
 ```
 
-当前工作树 V1.3 Release 已 clean build 通过。Linker 已锁定 `FLASH ORIGIN=0x08000000, LENGTH=20K`，超过 `0x08004FFF` 会直接链接失败。
+当前工作树 V1.3（16 MHz 正式版）Release 已 clean build 通过。Linker 已锁定 `FLASH ORIGIN=0x08000000, LENGTH=20K`，超过 `0x08004FFF` 会直接链接失败。
 
 ```text
-FLASH 17976 B / 20 KiB  87.77%  （剩余 2504 B）
+FLASH 17940 B / 20 KiB  87.60%  （剩余 2540 B）
 RAM    17904 B / 32 KiB  54.64%
 0 compiler/linker error
 ```
@@ -638,9 +637,9 @@ RAM    17904 B / 32 KiB  54.64%
 | 删除未使用 UART | 17,688 B | 1,636 B |
 | Release 细化优化、移除空 GPIO 初始化 | 17,344 B | 1,980 B |
 | V1.3 历史精简启动、向量表和 FDCAN ISR | 16,488 B | 2,836 B |
-| 当前工作树 Release | **17,976 B** | 1,348 B |
+| 16 MHz 正式版 Release（当前） | **17,940 B** | 1,384 B |
 
-Flash 数值按 ELF 的 `text + data` 统计，不是 `.elf` 文件在电脑上的文件大小。必须使用 Release；Debug 的 `-O0/-g3` 用于调试，不满足 20 KiB 体积约束。
+Flash 数值按 ELF 的 `text + data` 统计，不是 `.elf` 文件在电脑上的文件大小。本工程只提供 `Release` 预设（`CMakePresets.json` 中 `Debug` 已移除）：`-O0 -g3` 的 Debug 构建约 35 KB，会超出 20 KiB 分区约 14 KB 而无法链接，因此不再作为可选项保留。
 
 V1.3 的启动文件是纯 C 固件专用配置，不调用静态构造器。向量表目前只覆盖到外部 IRQ21（FDCAN1 IT0）；以后若 Bootloader 新增 IRQ22 或更高编号的外设中断，必须同步恢复向量表至对应表项。
 ## 14. 自治模式总线流量约束

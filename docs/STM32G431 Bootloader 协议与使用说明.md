@@ -539,16 +539,16 @@ Classic 输出为 CANPro SendList；FD 输出为一行一个 64B DATA 的文本�
 cmake --build --preset Release --clean-first
 ```
 
-当前工作树 V1.3 最近一次 clean build：
+当前工作树 V1.3（16 MHz 正式版）最近一次 clean build：
 
 ```text
 RAM    17904 B / 32 KiB  54.64%
-FLASH 17976 B / 20 KiB  87.77%
-剩余   2504 B
+FLASH 17940 B / 20 KiB  87.60%
+剩余   2540 B
 0 compiler/linker error
 ```
 
-历史精简构建曾达到 16,488 B；当前工作树相对 V1.2 的 19,324 B 减少 1,348 B。Flash 使用量按 ELF 的 `text + data` 计算。Bootloader 与 APP 可以复用 SRAM，但把函数放入 SRAM 并不能直接减小 Flash，因为函数初始镜像仍需存放在 Flash。
+历史精简构建曾达到 16,488 B；当前 16 MHz 正式版相对 V1.2 的 19,324 B 减少 1,384 B。Flash 使用量按 ELF 的 `text + data` 计算。Bootloader 与 APP 可以复用 SRAM，但把函数放入 SRAM 并不能直接减小 Flash，因为函数初始镜像仍需存放在 Flash。
 
 V1.3 Release 专用约束：
 

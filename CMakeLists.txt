@@ -14,8 +14,9 @@ set(CMAKE_C_EXTENSIONS ON)
 
 
 # Define the build type
+# 本工程只支持 Release：Debug(-O0 -g3) 超出 20 KiB Bootloader 分区，无法链接。
 if(NOT CMAKE_BUILD_TYPE)
-    set(CMAKE_BUILD_TYPE "Debug")
+    set(CMAKE_BUILD_TYPE "Release" CACHE STRING "Build type (only Release is supported)")
 endif()
 
 # Set the project name
@@ -104,7 +105,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     # Add user defined libraries
 )
 
-# 每个晶振预设在各自构建目录生成可直接烧录的裸 BIN，避免误用旧文件。
+# 构建后在同目录生成可直接烧录的裸 BIN，与 .elf 一起产出，避免误用旧文件。
 add_custom_command(
     TARGET ${CMAKE_PROJECT_NAME}
     POST_BUILD
